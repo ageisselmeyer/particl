@@ -64,7 +64,6 @@ position:relative;
 width:560px;
 height:560px;
 margin:20px auto 0;
-border-radius:16px;
 overflow:hidden;
 }
 
@@ -75,7 +74,6 @@ top:0;
 width:560px;
 height:560px;
 margin-top:0;
-border-radius:16px;
 }
 
 /* Let the WebGL galaxy show through */
@@ -96,6 +94,9 @@ display:none;
 margin-top:20px;
 font-size:18px;
 }
+
+#decodeProgressWrap{ text-align:left; }
+#decodeProgressText{ min-height:1.2em; }
 </style>
 </head>
 
@@ -131,6 +132,13 @@ font-size:18px;
 
 <div id="status" style="margin-top:12px; opacity:0.9;"></div>
 
+<div id="decodeProgressWrap" style="display:none; margin-top:12px; max-width:360px; margin-left:auto; margin-right:auto;">
+  <div id="decodeProgressBarBg" style="height:10px; background:rgba(255,255,255,0.12); border-radius:6px; overflow:hidden;">
+    <div id="decodeProgressBar" style="height:100%; width:0%; background:linear-gradient(90deg, rgba(100,180,255,0.9), rgba(140,220,255,0.95)); border-radius:6px; transition:width 0.2s;"></div>
+  </div>
+  <div id="decodeProgressText" style="margin-top:6px; font-size:13px; opacity:0.85;"></div>
+</div>
+
 <a id="download">Download recovered file</a>
 
 <script>
@@ -139,7 +147,7 @@ const canvas = document.getElementById("tx")
 const ctx = canvas.getContext("2d")
 
 const bgCanvas = document.getElementById("bg")
-const gl = bgCanvas.getContext("webgl2", { antialias:true, alpha:false, premultipliedAlpha:false })
+const gl = bgCanvas.getContext("webgl2", { antialias:false, alpha:false, premultipliedAlpha:false })
 let galaxy = null
 
 const video = document.getElementById("video")
@@ -150,6 +158,10 @@ const chooseFileBtn = document.getElementById("chooseFileBtn")
 chooseFileBtn.addEventListener("click", () => fileInputEl.click())
 const modeButtonsEl = document.getElementById("modeButtons")
 const canvasWrapEl = document.getElementById("canvasWrap")
+const decodeProgressWrap = document.getElementById("decodeProgressWrap")
+const decodeProgressBar = document.getElementById("decodeProgressBar")
+const decodeProgressText = document.getElementById("decodeProgressText")
+let decodeRateSamples = []  // { t, have } for ETA
 
 const GRID = 200 // sampled raster resolution on decoder (high bandwidth)
 const FRAME_BITS = GRID * GRID
@@ -180,6 +192,7 @@ uniform float uTime;
 uniform vec2 uAspect;
 out vec4 vCol;
 out float vGlow;
+out vec2 vNdc;
 vec3 rotY(vec3 p, float a){ float c=cos(a), s=sin(a); return vec3(c*p.x + s*p.z, p.y, -s*p.x + c*p.z); }
 vec3 rotX(vec3 p, float a){ float c=cos(a), s=sin(a); return vec3(p.x, c*p.y - s*p.z, s*p.y + c*p.z); }
 void main(){
@@ -190,9 +203,12 @@ void main(){
   p=rotY(p, swirl);
   p=rotX(p, sin(t*0.7 + r*6.283)*0.35);
   float z=p.z + 1.9;
+  // Cull back hemisphere so points don't pile up on the limb (no half-circle white noise arc)
+  if(p.z < -0.12) { vNdc = vec2(10.0); gl_Position = vec4(2.0, 2.0, 0.0, 1.0); gl_PointSize = 0.0; return; }
   vec2 ndc = p.xy / z;
   ndc.x *= uAspect.x / uAspect.y;
   ndc *= 1.76;  // ~2x previous 0.88 so ball is twice as large; finders stay at corners
+  vNdc = ndc;
   gl_Position = vec4(ndc, 0.0, 1.0);
   float pt = mix(2.4, 8.0, r) * (1.0 + 0.5*(p.z*0.5+0.5));
   // Shrink points near top/bottom so halos don't bleed (removes arc artifacts)
@@ -213,8 +229,10 @@ void main(){
 precision highp float;
 in vec4 vCol;
 in float vGlow;
+in vec2 vNdc;
 out vec4 outColor;
 void main(){
+  if(length(vNdc) > 0.96) discard;
   vec2 uv = gl_PointCoord*2.0 - 1.0;
   float d = dot(uv,uv);
   float core = exp(-d*12.0);
@@ -875,7 +893,7 @@ function startTxLoop(){
       // We draw ONLY “on” dots; “off” is absence.
       if(!bit) continue
 
-      const r = 0.45 + 1.05*p.z
+      const r = (0.45 + 1.05*p.z) * 0.78
       const t = performance.now()*0.001
       const shimmer = 0.55 + 0.45*Math.sin(t*2.2 + (p.gx*0.07 + p.gy*0.11))
       const a = (0.22 + 0.22*p.z) * shimmer
@@ -915,6 +933,10 @@ video.srcObject=stream
 video.style.display="block"
 
 rxFountain = new FountainRx()
+decodeRateSamples = []
+if(decodeProgressWrap) decodeProgressWrap.style.display = "block"
+if(decodeProgressBar) decodeProgressBar.style.width = "0%"
+if(decodeProgressText) decodeProgressText.textContent = ""
 setStatus("Decoding… point your camera at the transmitting screen. Auto-aligning…")
 decodeLoop()
 
@@ -992,9 +1014,31 @@ function decodeLoop(){
     const prog = rxFountain.progress()
     if(rxFountain.meta){
       const pct = prog.need ? Math.floor((prog.have/prog.need)*100) : 0
+      if(decodeProgressBar) decodeProgressBar.style.width = pct + "%"
+      const now = Date.now() / 1000
+      if(decodeRateSamples.length === 0 || now - decodeRateSamples[decodeRateSamples.length - 1].t >= 0.5){
+        decodeRateSamples.push({ t: now, have: prog.have })
+        if(decodeRateSamples.length > 20) decodeRateSamples.shift()
+      }
+      let timeRemain = ""
+      if(decodeRateSamples.length >= 2){
+        const first = decodeRateSamples[0], last = decodeRateSamples[decodeRateSamples.length - 1]
+        const dt = last.t - first.t
+        const dHave = last.have - first.have
+        if(dt > 0 && dHave >= 0){
+          const rate = dHave / dt
+          if(rate > 0.1){
+            const remain = Math.max(0, prog.need - prog.have)
+            const sec = Math.ceil(remain / rate)
+            timeRemain = sec <= 60 ? "~" + sec + " s remaining" : "~" + Math.ceil(sec/60) + " min remaining"
+          }
+        }
+      }
+      if(decodeProgressText) decodeProgressText.textContent = timeRemain || (prog.need ? (prog.need - prog.have) + " chunks left" : "")
       setStatus(`Receiving “${rxFountain.meta.name}”: ${prog.have}/${prog.need} chunks (${pct}%).`)
     }else{
       setStatus("Locked signal. Waiting for metadata…")
+      if(decodeProgressText) decodeProgressText.textContent = "Waiting for signal…"
     }
     if(rxFountain.isComplete()){
       const bytes = rxFountain.buildFile()
@@ -1004,6 +1048,8 @@ function decodeLoop(){
       link.href = url
       link.download = rxFountain.meta?.name || "recovered_file"
       link.style.display = "block"
+      if(decodeProgressBar) decodeProgressBar.style.width = "100%"
+      if(decodeProgressText) decodeProgressText.textContent = "Done"
       setStatus(`Recovered “${link.download}” (${bytes.length} bytes). You can download it now.`)
       return
     }
