@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="UTF-8">
-<title>Particle Cloud</title>
+<title>PartiCl</title>
 
 <style>
 body{
@@ -98,7 +98,7 @@ font-size:18px;
 
 <body>
 
-<h2>Particle Cloud</h2>
+<h2>PartiCl</h2>
 
 <input type="file" id="fileInput" style="display:none">
 
@@ -899,7 +899,12 @@ hideModeButtons()
 fileInputEl.style.display = "none"
 if(chooseFileWrap) chooseFileWrap.style.display = "none"
 
-let stream=await navigator.mediaDevices.getUserMedia({video:true})
+let stream
+try {
+  stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:"environment"}})
+} catch (_) {
+  stream=await navigator.mediaDevices.getUserMedia({video:true})
+}
 
 video.srcObject=stream
 
