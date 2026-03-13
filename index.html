@@ -162,6 +162,7 @@ const decodeProgressWrap = document.getElementById("decodeProgressWrap")
 const decodeProgressBar = document.getElementById("decodeProgressBar")
 const decodeProgressText = document.getElementById("decodeProgressText")
 let decodeRateSamples = []  // { t, have } for ETA
+let decodeFramesReceived = 0  // count decoded frames (so user sees activity before meta)
 
 const GRID = 200 // sampled raster resolution on decoder (high bandwidth)
 const FRAME_BITS = GRID * GRID
@@ -934,6 +935,7 @@ video.style.display="block"
 
 rxFountain = new FountainRx()
 decodeRateSamples = []
+decodeFramesReceived = 0
 if(decodeProgressWrap) decodeProgressWrap.style.display = "block"
 if(decodeProgressBar) decodeProgressBar.style.width = "0%"
 if(decodeProgressText) decodeProgressText.textContent = ""
@@ -1010,10 +1012,11 @@ function decodeLoop(){
 
   const pkt = decodePacketFromFrame(img.data, sampSize, sampSize, corners)
   if(pkt && rxFountain){
+    decodeFramesReceived++
     rxFountain.ingestPacket(pkt)
     const prog = rxFountain.progress()
-    if(rxFountain.meta){
-      const pct = prog.need ? Math.floor((prog.have/prog.need)*100) : 0
+    if(prog.need > 0){
+      const pct = Math.min(100, Math.floor((prog.have / prog.need) * 100))
       if(decodeProgressBar) decodeProgressBar.style.width = pct + "%"
       const now = Date.now() / 1000
       if(decodeRateSamples.length === 0 || now - decodeRateSamples[decodeRateSamples.length - 1].t >= 0.5){
@@ -1034,11 +1037,13 @@ function decodeLoop(){
           }
         }
       }
-      if(decodeProgressText) decodeProgressText.textContent = timeRemain || (prog.need ? (prog.need - prog.have) + " chunks left" : "")
-      setStatus(`Receiving “${rxFountain.meta.name}”: ${prog.have}/${prog.need} chunks (${pct}%).`)
+      if(decodeProgressText) decodeProgressText.textContent = timeRemain || (prog.need - prog.have) + " chunks left"
+      const name = rxFountain.meta ? rxFountain.meta.name : "file"
+      setStatus("Receiving \"" + name + "\": " + prog.have + "/" + prog.need + " chunks (" + pct + "%).")
     }else{
-      setStatus("Locked signal. Waiting for metadata…")
-      if(decodeProgressText) decodeProgressText.textContent = "Waiting for signal…"
+      setStatus("Locked signal. " + decodeFramesReceived + " frames received. Waiting for file info…")
+      if(decodeProgressText) decodeProgressText.textContent = decodeFramesReceived + " frames received. Keep camera steady on the screen…"
+      if(decodeProgressBar) decodeProgressBar.style.width = Math.min(20, decodeFramesReceived * 2) + "%"
     }
     if(rxFountain.isComplete()){
       const bytes = rxFountain.buildFile()
