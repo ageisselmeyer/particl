@@ -81,10 +81,14 @@ margin-top:0;
 #tx{ background:transparent; }
 
 video{
-width:min(100vw,560px);
+width:min(90vw,480px);
+height:min(90vw,480px); /* force square on Safari/iOS */
 max-width:100%;
-max-height:min(80vh,100vw);
+max-height:80vh;
+display:block;
 margin-top:20px;
+margin-left:auto;
+margin-right:auto;
 border-radius:10px;
 object-fit:contain;
 }
@@ -127,17 +131,14 @@ font-size:18px;
 <br>
 
 <video id="video" autoplay playsinline style="display:none"></video>
-
-<br>
-
-<div id="status" style="margin-top:12px; opacity:0.9;"></div>
-
-<div id="decodeProgressWrap" style="display:none; margin-top:12px; max-width:360px; margin-left:auto; margin-right:auto;">
+<div id="decodeProgressWrap" style="display:none; margin-top:8px; max-width:360px; margin-left:auto; margin-right:auto;">
   <div id="decodeProgressBarBg" style="height:10px; background:rgba(255,255,255,0.12); border-radius:6px; overflow:hidden;">
     <div id="decodeProgressBar" style="height:100%; width:0%; background:linear-gradient(90deg, rgba(100,180,255,0.9), rgba(140,220,255,0.95)); border-radius:6px; transition:width 0.2s;"></div>
   </div>
   <div id="decodeProgressText" style="margin-top:6px; font-size:13px; opacity:0.85;"></div>
 </div>
+
+<div id="status" style="margin-top:8px; opacity:0.9;"></div>
 
 <a id="download">Download recovered file</a>
 
