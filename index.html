@@ -1,0 +1,1316 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Particle Cloud</title>
+
+<style>
+body{
+background:#050505;
+color:white;
+font-family:Arial,Helvetica,sans-serif;
+text-align:center;
+}
+
+/* Galaxy/space style for all buttons and file input */
+button,
+input[type="file"]{
+background:linear-gradient(145deg, #0d0a18 0%, #1a1530 50%, #0f0d1a 100%);
+color:#e8e4f4;
+border:1px solid rgba(120, 180, 255, 0.35);
+border-radius:12px;
+padding:12px 24px;
+margin:10px;
+font-size:15px;
+font-weight:600;
+letter-spacing:0.06em;
+text-transform:uppercase;
+box-shadow:0 0 20px rgba(100, 150, 255, 0.15), inset 0 1px 0 rgba(255,255,255,0.06);
+transition:border-color 0.2s, box-shadow 0.2s, transform 0.15s;
+cursor:pointer;
+}
+button:hover,
+input[type="file"]:hover{
+border-color:rgba(140, 200, 255, 0.6);
+box-shadow:0 0 28px rgba(100, 180, 255, 0.25), inset 0 1px 0 rgba(255,255,255,0.08);
+transform:translateY(-1px);
+}
+button:active,
+input[type="file"]:active{
+transform:translateY(0);
+box-shadow:0 0 14px rgba(100, 150, 255, 0.2);
+}
+input[type="file"]{
+font-family:inherit;
+}
+input[type="file"]::file-selector-button{
+background:transparent;
+color:inherit;
+border:none;
+font:inherit;
+padding:0;
+margin-right:10px;
+cursor:pointer;
+}
+
+canvas{
+background:black;
+border-radius:16px;
+margin-top:20px;
+}
+
+#canvasWrap{
+position:relative;
+width:560px;
+height:560px;
+margin:20px auto 0;
+border-radius:16px;
+overflow:hidden;
+}
+
+#bg,#tx{
+position:absolute;
+left:0;
+top:0;
+width:560px;
+height:560px;
+margin-top:0;
+border-radius:16px;
+}
+
+/* Let the WebGL galaxy show through */
+#bg{ background:black; }
+#tx{ background:transparent; }
+
+video{
+width:440px;
+margin-top:20px;
+border-radius:10px;
+}
+
+#download{
+display:none;
+margin-top:20px;
+font-size:18px;
+}
+</style>
+</head>
+
+<body>
+
+<h2>Particle Cloud</h2>
+
+<input type="file" id="fileInput" style="display:none">
+
+<div id="chooseFileWrap" style="display:none">
+  <button type="button" id="chooseFileBtn">Choose file</button>
+</div>
+
+<br>
+
+<div id="modeButtons">
+  <button onclick="encode()">◇ Encode</button>
+  <button onclick="startDecoder()">▷ Decode</button>
+</div>
+
+<br>
+
+<div id="canvasWrap">
+  <canvas id="bg" width="560" height="560"></canvas>
+  <canvas id="tx" width="560" height="560"></canvas>
+</div>
+
+<br>
+
+<video id="video" autoplay playsinline></video>
+
+<br>
+
+<div id="status" style="margin-top:12px; opacity:0.9;"></div>
+
+<a id="download">Download recovered file</a>
+
+<script>
+
+const canvas = document.getElementById("tx")
+const ctx = canvas.getContext("2d")
+
+const bgCanvas = document.getElementById("bg")
+const gl = bgCanvas.getContext("webgl2", { antialias:true, alpha:false, premultipliedAlpha:false })
+let galaxy = null
+
+const video = document.getElementById("video")
+const statusEl = document.getElementById("status")
+const fileInputEl = document.getElementById("fileInput")
+const chooseFileWrap = document.getElementById("chooseFileWrap")
+const chooseFileBtn = document.getElementById("chooseFileBtn")
+chooseFileBtn.addEventListener("click", () => fileInputEl.click())
+const modeButtonsEl = document.getElementById("modeButtons")
+
+const GRID = 200 // sampled raster resolution on decoder (high bandwidth)
+const FRAME_BITS = GRID * GRID
+const SYNC = "1100110011110000101010101100110011001100111100001010101011001100" // 64-bit sync marker
+const MAGIC = "VTX2" // 4 bytes (32 bits)
+const FILE_ID = (crypto && crypto.getRandomValues) ? crypto.getRandomValues(new Uint32Array(1))[0] >>> 0 : ((Math.random()*2**32)>>>0)
+
+let frames=[]
+let frameIndex=0
+let particles=[] // repurposed as precomputed carrier cells
+let txMeta = null
+let txRun = 0
+let txFountain = null
+let rxFountain = null
+let txPackets = []
+let txPacketCursor = 0
+let txTotalFrames = 0
+let txPayloadBitsPerFrame = 0
+let txSessionNonce = 0
+
+function initGalaxy(){
+  if(!gl) return null
+  try{
+    const vs = `#version 300 es
+precision highp float;
+layout(location=0) in vec4 aSeed;
+uniform float uTime;
+uniform vec2 uAspect;
+out vec4 vCol;
+out float vGlow;
+vec3 rotY(vec3 p, float a){ float c=cos(a), s=sin(a); return vec3(c*p.x + s*p.z, p.y, -s*p.x + c*p.z); }
+vec3 rotX(vec3 p, float a){ float c=cos(a), s=sin(a); return vec3(p.x, c*p.y - s*p.z, s*p.y + c*p.z); }
+void main(){
+  float t=uTime;
+  vec3 p=normalize(aSeed.xyz) * (0.55 + 0.35*aSeed.w);
+  float r=aSeed.w;
+  float swirl=(1.7 + 1.1*(1.0-r))*t + r*10.0;
+  p=rotY(p, swirl);
+  p=rotX(p, sin(t*0.7 + r*6.283)*0.35);
+  float z=p.z + 1.9;
+  vec2 ndc = p.xy / z;
+  ndc.x *= uAspect.x / uAspect.y;
+  ndc *= 1.76;  // ~2x previous 0.88 so ball is twice as large; finders stay at corners
+  gl_Position = vec4(ndc, 0.0, 1.0);
+  float pt = mix(2.4, 8.0, r) * (1.0 + 0.5*(p.z*0.5+0.5));
+  // Shrink points near top/bottom so halos don't bleed (removes arc artifacts)
+  float topFade = smoothstep(1.2, 1.65, ndc.y);
+  float bottomFade = smoothstep(-1.65, -1.2, ndc.y);
+  gl_PointSize = pt * (1.0 - topFade * 0.85) * mix(0.15, 1.0, bottomFade);
+  float hue = 0.58 + 0.28*sin(r*6.283 + t*0.25) + 0.08*p.z;
+  vec3 col = vec3(
+    0.62 + 0.52*sin(6.283*(hue + 0.00)),
+    0.62 + 0.52*sin(6.283*(hue + 0.33)),
+    0.62 + 0.52*sin(6.283*(hue + 0.67))
+  );
+  col = pow(col, vec3(1.25));
+  vCol = vec4(col, 0.72);
+  vGlow = 0.82 + 0.75*(p.z*0.5+0.5);
+}`;
+    const fs = `#version 300 es
+precision highp float;
+in vec4 vCol;
+in float vGlow;
+out vec4 outColor;
+void main(){
+  vec2 uv = gl_PointCoord*2.0 - 1.0;
+  float d = dot(uv,uv);
+  float core = exp(-d*12.0);
+  float halo = exp(-d*3.5)*0.4;
+  float a = (core + halo) * vCol.a;
+  outColor = vec4(vCol.rgb * (0.88*core + 0.28*halo) * vGlow, a);
+}`;
+    function compile(type, src){
+      const s = gl.createShader(type)
+      gl.shaderSource(s, src)
+      gl.compileShader(s)
+      if(!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s) || "shader")
+      return s
+    }
+    const prog = gl.createProgram()
+    gl.attachShader(prog, compile(gl.VERTEX_SHADER, vs))
+    gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fs))
+    gl.linkProgram(prog)
+    if(!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog) || "link")
+
+    const N = 24000
+    const seeds = new Float32Array(N*4)
+    for(let i=0;i<N;i++){
+      const u = Math.random()*2 - 1
+      const a = Math.random()*Math.PI*2
+      const s = Math.sqrt(1-u*u)
+      seeds[i*4+0] = s*Math.cos(a)
+      seeds[i*4+1] = u
+      seeds[i*4+2] = s*Math.sin(a)
+      seeds[i*4+3] = Math.random()
+    }
+    const vbo = gl.createBuffer()
+    gl.bindBuffer(gl.ARRAY_BUFFER, vbo)
+    gl.bufferData(gl.ARRAY_BUFFER, seeds, gl.STATIC_DRAW)
+
+    gl.enable(gl.BLEND)
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE)
+
+    return { prog, vbo, N }
+  }catch(e){
+    setStatus(`WebGL init failed: ${e.message}`)
+    return null
+  }
+}
+
+function renderGalaxy(t){
+  if(!gl) return
+  if(!galaxy) galaxy = initGalaxy()
+  if(!galaxy) return
+  gl.viewport(0,0,bgCanvas.width,bgCanvas.height)
+  gl.clearColor(0,0,0,1)
+  gl.clear(gl.COLOR_BUFFER_BIT)
+  gl.useProgram(galaxy.prog)
+  gl.bindBuffer(gl.ARRAY_BUFFER, galaxy.vbo)
+  gl.enableVertexAttribArray(0)
+  gl.vertexAttribPointer(0, 4, gl.FLOAT, false, 0, 0)
+  gl.uniform1f(gl.getUniformLocation(galaxy.prog,"uTime"), t)
+  gl.uniform2f(gl.getUniformLocation(galaxy.prog,"uAspect"), bgCanvas.width, bgCanvas.height)
+  gl.drawArrays(gl.POINTS, 0, galaxy.N)
+}
+
+fileInputEl.addEventListener("change", () => {
+  if(fileInputEl.files && fileInputEl.files[0]){
+    encodeSelectedFile(fileInputEl.files[0])
+  }
+})
+
+function encode(){
+
+hideModeButtons()
+
+// First click: show "Choose file" button and open picker; file input stays hidden.
+if(chooseFileWrap.style.display === "none" || !chooseFileWrap.style.display){
+  fileInputEl.value = ""
+  chooseFileWrap.style.display = "block"
+  setStatus("Choose a file to start encoding.")
+  fileInputEl.click()
+  return
+}
+
+// If picker is visible but no file selected yet, open it again.
+let file=fileInputEl.files[0]
+if(!file){
+  setStatus("Choose a file to start encoding.")
+  fileInputEl.click()
+  return
+}
+
+let reader=new FileReader()
+
+reader.onload=async ()=>{
+
+const buffer = reader.result
+const bytes = new Uint8Array(buffer)
+
+txMeta = {
+  name: file.name || "recovered_file",
+  type: file.type || "application/octet-stream",
+  size: bytes.length
+}
+
+const payloadBytes = buildPayload(bytes, txMeta)
+const payloadBits = bytesToBits(payloadBytes)
+const framedBits = SYNC + payloadBits
+
+buildFrames(framedBits)
+initParticles()
+
+txRun++
+frameIndex = 0
+setStatus(`Encoding “${txMeta.name}” (${txMeta.size} bytes). Streaming ${Math.ceil(frames.length/3)} frames…`)
+startTxLoop()
+
+}
+
+reader.readAsArrayBuffer(file)
+
+}
+
+function encodeSelectedFile(file){
+let reader=new FileReader()
+
+reader.onload=async ()=>{
+
+const buffer = reader.result
+const bytes = new Uint8Array(buffer)
+
+txMeta = {
+  name: file.name || "recovered_file",
+  type: file.type || "application/octet-stream",
+  size: bytes.length
+}
+
+txFountain = new FountainTx(bytes, txMeta)
+initParticles()
+
+txRun++
+frameIndex = 0
+frames = [txFountain.nextFrameBits()]
+setStatus(`Encoding “${txMeta.name}” (${txMeta.size} bytes). Streaming fountain droplets…`)
+startTxLoop()
+
+}
+
+reader.readAsArrayBuffer(file)
+}
+
+class FountainTx{
+  constructor(fileBytes, meta){
+    this.meta = meta
+    this.fileBytes = fileBytes
+    this.fileId = (crypto && crypto.getRandomValues) ? crypto.getRandomValues(new Uint32Array(1))[0]>>>0 : ((Math.random()*2**32)>>>0)
+    this.chunkSize = 1024
+    this.K = Math.ceil(fileBytes.length / this.chunkSize)
+    this.chunks = new Array(this.K)
+    for(let i=0;i<this.K;i++){
+      const start = i*this.chunkSize
+      const end = Math.min(fileBytes.length, start+this.chunkSize)
+      const c = new Uint8Array(this.chunkSize)
+      c.set(fileBytes.slice(start,end))
+      this.chunks[i]=c
+    }
+    this.seq = 0
+    this.metaEvery = 25
+  }
+
+  _rng(seed){
+    let x = seed >>> 0
+    return () => {
+      x ^= (x << 13) >>> 0
+      x ^= (x >>> 17) >>> 0
+      x ^= (x << 5) >>> 0
+      return x >>> 0
+    }
+  }
+
+  _degree(rng){
+    const r = (rng()>>>0) / 0xFFFFFFFF
+    if(r < 0.25) return 1
+    if(r < 0.55) return 2
+    if(r < 0.75) return 3
+    if(r < 0.88) return 4
+    if(r < 0.95) return 6
+    return Math.min(this.K, 10)
+  }
+
+  _crc32(u8){
+    return crc32(u8)
+  }
+
+  _buildMetaPacket(){
+    const name = (this.meta.name || "recovered_file").slice(0, 80)
+    const type = (this.meta.type || "application/octet-stream").slice(0, 60)
+    const nameB = asciiToBytes(name)
+    const typeB = asciiToBytes(type)
+    const header = concatBytes([
+      asciiToBytes(MAGIC),
+      new Uint8Array([1]), // kind meta
+      u32ToBytesLE(this.fileId),
+      u32ToBytesLE(this.fileBytes.length>>>0),
+      u16ToBytesLE(this.chunkSize),
+      u32ToBytesLE(this.K>>>0),
+      u16ToBytesLE(nameB.length),
+      u16ToBytesLE(typeB.length),
+      nameB,
+      typeB
+    ])
+    return concatBytes([header, u32ToBytesLE(this._crc32(header))])
+  }
+
+  _buildDropletPacket(){
+    const seed = (this.seq * 2654435761) >>> 0
+    const rng = this._rng(seed ^ this.fileId)
+    const d = this._degree(rng)
+    const chosen = new Set()
+    while(chosen.size < d){
+      chosen.add((rng()>>>0) % this.K)
+    }
+    const payload = new Uint8Array(this.chunkSize)
+    for(const idx of chosen){
+      const c = this.chunks[idx]
+      for(let i=0;i<payload.length;i++) payload[i] ^= c[i]
+    }
+    const header = concatBytes([
+      asciiToBytes(MAGIC),
+      new Uint8Array([2]), // kind droplet
+      u32ToBytesLE(this.fileId),
+      u32ToBytesLE(seed),
+      new Uint8Array([d & 255]),
+      u32ToBytesLE(this.K>>>0),
+      u16ToBytesLE(this.chunkSize),
+      u16ToBytesLE(payload.length),
+      payload
+    ])
+    return concatBytes([header, u32ToBytesLE(this._crc32(header))])
+  }
+
+  nextFrameBits(){
+    let pkt
+    if((this.seq % this.metaEvery) === 0){
+      pkt = this._buildMetaPacket()
+    }else{
+      pkt = this._buildDropletPacket()
+    }
+    this.seq++
+    const payloadBits = bytesToBits(pkt)
+    const needed = FRAME_BITS - SYNC.length
+    const clipped = payloadBits.padEnd(needed, "0").slice(0, needed)
+    return (SYNC + clipped).padEnd(FRAME_BITS, "0").slice(0, FRAME_BITS)
+  }
+}
+
+class FountainRx{
+  constructor(){
+    this.reset()
+  }
+  reset(){
+    this.fileId = null
+    this.totalSize = null
+    this.chunkSize = null
+    this.K = null
+    this.meta = null
+    this.chunks = null
+    this.known = null
+    this.waitingByChunk = null
+    this.droplets = []
+    this.solved = 0
+  }
+  ingestPacket(pkt){
+    if(pkt.length < 9) return
+    const magic = String.fromCharCode(pkt[0],pkt[1],pkt[2],pkt[3])
+    if(magic !== MAGIC) return
+    const kind = pkt[4]
+    if(kind === 1){
+      let off = 5
+      if(pkt.length < off + 4+4+2+4+2+2+4) return
+      const fileId = bytesToU32LE(pkt, off); off+=4
+      const totalSize = bytesToU32LE(pkt, off); off+=4
+      const chunkSize = bytesToU16LE(pkt, off); off+=2
+      const K = bytesToU32LE(pkt, off); off+=4
+      const nameLen = bytesToU16LE(pkt, off); off+=2
+      const typeLen = bytesToU16LE(pkt, off); off+=2
+      if(pkt.length < off + nameLen + typeLen + 4) return
+      const name = String.fromCharCode(...pkt.slice(off, off+nameLen)); off += nameLen
+      const type = String.fromCharCode(...pkt.slice(off, off+typeLen)); off += typeLen
+      const crc = bytesToU32LE(pkt, off); off += 4
+      const calc = crc32(pkt.slice(0, pkt.length-4))
+      if(calc !== crc) return
+      if(this.fileId == null) this.fileId = fileId
+      if(this.fileId !== fileId) return
+      this.totalSize = totalSize
+      this.chunkSize = chunkSize
+      this.K = K
+      this.meta = { name, type }
+      if(!this.chunks){
+        this.chunks = new Array(K)
+        this.known = new Array(K).fill(false)
+        this.waitingByChunk = new Array(K)
+        for(let i=0;i<K;i++) this.waitingByChunk[i] = []
+      }
+      return
+    }
+    if(kind === 2){
+      let off = 5
+      if(pkt.length < off + 4+4+1+4+2+2) return
+      const fileId = bytesToU32LE(pkt, off); off+=4
+      const seed = bytesToU32LE(pkt, off); off+=4
+      const d = pkt[off]; off+=1
+      const K = bytesToU32LE(pkt, off); off+=4
+      const chunkSize = bytesToU16LE(pkt, off); off+=2
+      const payloadLen = bytesToU16LE(pkt, off); off+=2
+      if(pkt.length < off + payloadLen + 4) return
+      const payload = pkt.slice(off, off+payloadLen); off += payloadLen
+      const crc = bytesToU32LE(pkt, off); off+=4
+      const calc = crc32(pkt.slice(0, pkt.length-4))
+      if(calc !== crc) return
+
+      if(this.fileId == null) this.fileId = fileId
+      if(this.fileId !== fileId) return
+      if(this.K == null) this.K = K
+      if(this.chunkSize == null) this.chunkSize = chunkSize
+      if(!this.chunks && this.K != null){
+        this.chunks = new Array(this.K)
+        this.known = new Array(this.K).fill(false)
+        this.waitingByChunk = new Array(this.K)
+        for(let i=0;i<this.K;i++) this.waitingByChunk[i] = []
+      }
+      if(!this.chunks) return
+      if(K !== this.K || chunkSize !== this.chunkSize) return
+
+      // regenerate indices from seed
+      let x = (seed ^ this.fileId) >>> 0
+      const rng = () => {
+        x ^= (x << 13) >>> 0
+        x ^= (x >>> 17) >>> 0
+        x ^= (x << 5) >>> 0
+        return x >>> 0
+      }
+      const chosen = new Set()
+      while(chosen.size < Math.max(1, Math.min(this.K, d))){
+        chosen.add((rng()>>>0) % this.K)
+      }
+      const indices = Array.from(chosen)
+
+      const reduced = new Uint8Array(payload)
+      const unknown = []
+      for(const idx of indices){
+        if(this.known[idx]){
+          const c = this.chunks[idx]
+          for(let i=0;i<reduced.length;i++) reduced[i] ^= c[i]
+        }else{
+          unknown.push(idx)
+        }
+      }
+      if(unknown.length === 0) return
+      const di = this.droplets.length
+      this.droplets.push({ unknown: unknown.slice(), payload: reduced })
+      for(const idx of unknown) this.waitingByChunk[idx].push(di)
+      if(unknown.length === 1) this._solve(unknown[0], reduced)
+    }
+  }
+  _solve(idx, bytes){
+    if(this.known[idx]) return
+    const c = new Uint8Array(this.chunkSize)
+    c.set(bytes.slice(0, this.chunkSize))
+    this.chunks[idx] = c
+    this.known[idx] = true
+    this.solved++
+
+    const waiting = this.waitingByChunk[idx]
+    for(const di of waiting){
+      const d = this.droplets[di]
+      if(!d) continue
+      const pos = d.unknown.indexOf(idx)
+      if(pos === -1) continue
+      for(let i=0;i<d.payload.length;i++) d.payload[i] ^= c[i]
+      d.unknown.splice(pos, 1)
+      if(d.unknown.length === 1) this._solve(d.unknown[0], d.payload)
+    }
+    this.waitingByChunk[idx] = []
+  }
+  progress(){
+    if(!this.K) return { have: 0, need: 0 }
+    return { have: this.solved, need: this.K }
+  }
+  isComplete(){
+    return this.K != null && this.totalSize != null && this.solved >= this.K
+  }
+  buildFile(){
+    if(!this.isComplete()) return null
+    const merged = new Uint8Array(this.K * this.chunkSize)
+    for(let i=0;i<this.K;i++){
+      merged.set(this.chunks[i] || new Uint8Array(this.chunkSize), i*this.chunkSize)
+    }
+    return merged.slice(0, this.totalSize)
+  }
+}
+
+function detectMarkers(img, w, h){
+  let best = {
+    cyan: {s:-1,x:0,y:0},
+    mag:  {s:-1,x:0,y:0},
+    yel:  {s:-1,x:0,y:0},
+    grn:  {s:-1,x:0,y:0},
+  }
+  for(let y=0;y<h;y++){
+    for(let x=0;x<w;x++){
+      const i=(y*w+x)*4
+      const r=img[i], g=img[i+1], b=img[i+2]
+      const sC = (g+b) - r
+      const sM = (r+b) - g
+      const sY = (r+g) - b
+      const sG = g - (r*0.5 + b*0.5)
+      if(sC > best.cyan.s) best.cyan={s:sC,x,y}
+      if(sM > best.mag.s)  best.mag={s:sM,x,y}
+      if(sY > best.yel.s)  best.yel={s:sY,x,y}
+      if(sG > best.grn.s)  best.grn={s:sG,x,y}
+    }
+  }
+  return { tl: best.cyan, tr: best.mag, bl: best.yel, br: best.grn }
+}
+
+function computeHomography(src, dst){
+  const A=[], b=[]
+  for(let i=0;i<4;i++){
+    const x=src[i].x, y=src[i].y, u=dst[i].x, v=dst[i].y
+    A.push([x,y,1, 0,0,0, -u*x, -u*y]); b.push(u)
+    A.push([0,0,0, x,y,1, -v*x, -v*y]); b.push(v)
+  }
+  const M = new Array(8)
+  for(let i=0;i<8;i++){ M[i]=A[i].slice(); M[i].push(b[i]) }
+  for(let col=0; col<8; col++){
+    let pivot=col
+    for(let r=col+1;r<8;r++) if(Math.abs(M[r][col])>Math.abs(M[pivot][col])) pivot=r
+    const tmp=M[col]; M[col]=M[pivot]; M[pivot]=tmp
+    const div=M[col][col] || 1e-12
+    for(let c=col;c<9;c++) M[col][c]/=div
+    for(let r=0;r<8;r++){
+      if(r===col) continue
+      const f=M[r][col]
+      for(let c=col;c<9;c++) M[r][c]-=f*M[col][c]
+    }
+  }
+  const h=new Array(9).fill(0)
+  for(let i=0;i<8;i++) h[i]=M[i][8]
+  h[8]=1
+  return h
+}
+
+function invertHomography(H){
+  const a=H[0],b=H[1],c=H[2], d=H[3],e=H[4],f=H[5], g=H[6],h=H[7],i=H[8]
+  const A=e*i-f*h, B=f*g-d*i, C=d*h-e*g
+  const D=c*h-b*i, E=a*i-c*g, F=b*g-a*h
+  const G=b*f-c*e, Hh=c*d-a*f, I=a*e-b*d
+  const det=a*A + b*B + c*C
+  if(Math.abs(det)<1e-12) return null
+  const inv=1/det
+  return [A*inv, D*inv, G*inv, B*inv, E*inv, Hh*inv, C*inv, F*inv, I*inv]
+}
+
+function mapPoint(H, x, y){
+  const den = H[6]*x + H[7]*y + H[8]
+  return { x: (H[0]*x + H[1]*y + H[2]) / den, y: (H[3]*x + H[4]*y + H[5]) / den }
+}
+
+function decodePacketFromFrame(img, w, h, corners){
+  const src = [corners.tl, corners.tr, corners.br, corners.bl].map(p=>({x:p.x,y:p.y}))
+  const dst = [{x:0,y:0},{x:1,y:0},{x:1,y:1},{x:0,y:1}]
+  const H = computeHomography(src, dst)
+  const inv = invertHomography(H)
+  if(!inv) return null
+
+  let min=1e9, max=-1e9
+  const lum = new Float32Array(FRAME_BITS)
+  let idx=0
+  for(let y=0;y<GRID;y++){
+    for(let x=0;x<GRID;x++){
+      const u=(x+0.5)/GRID, v=(y+0.5)/GRID
+      const p=mapPoint(inv,u,v)
+      const px=Math.max(0,Math.min(w-1,Math.floor(p.x)))
+      const py=Math.max(0,Math.min(h-1,Math.floor(p.y)))
+      const ii=(py*w+px)*4
+      const r=img[ii], g=img[ii+1], b=img[ii+2]
+      const L=(0.2126*r + 0.7152*g + 0.0722*b)/255
+      lum[idx++] = L
+      if(L<min) min=L
+      if(L>max) max=L
+    }
+  }
+  // Otsu threshold on luminance (robust to exposure shifts)
+  const bins = 64
+  const hist = new Uint32Array(bins)
+  for(let i=0;i<lum.length;i++){
+    const b = Math.max(0, Math.min(bins-1, (lum[i] * bins) | 0))
+    hist[b]++
+  }
+  const total = lum.length
+  let sum = 0
+  for(let i=0;i<bins;i++) sum += i * hist[i]
+  let sumB = 0
+  let wB = 0
+  let varMax = -1
+  let thrBin = (bins/2)|0
+  for(let i=0;i<bins;i++){
+    wB += hist[i]
+    if(wB === 0) continue
+    const wF = total - wB
+    if(wF === 0) break
+    sumB += i * hist[i]
+    const mB = sumB / wB
+    const mF = (sum - sumB) / wF
+    const v = wB * wF * (mB - mF) * (mB - mF)
+    if(v > varMax){
+      varMax = v
+      thrBin = i
+    }
+  }
+  const thr = (thrBin + 0.5) / bins
+  let bits=""
+  for(let i=0;i<lum.length;i++) bits += (lum[i] > thr) ? "1":"0"
+  if(bits.slice(0, SYNC.length) !== SYNC) return null
+  return bitsToBytes(bits.slice(SYNC.length))
+}
+
+function buildFramesFromPackets(){
+  // Frame header: frameIndex (32) + totalFrames (32) + sessionNonce (32) + reserved (32)
+  // Remaining bits carry one packet (or part of it). We keep packet <= payloadBitsPerFrame.
+  frames = []
+  txPacketCursor = 0
+  txSessionNonce = (txSessionNonce + 1) >>> 0
+
+  const headerBits = 128
+  txPayloadBitsPerFrame = FRAME_BITS - headerBits
+  if(txPayloadBitsPerFrame <= 0) txPayloadBitsPerFrame = 1
+
+  // Packets are pre-sized to fit in one frame; totalFrames is virtual for progress only.
+  txTotalFrames = txPackets.length
+
+  for(let i=0;i<txPackets.length;i++){
+    const pktBits = bytesToBits(txPackets[i])
+    const payloadBits = pktBits.padEnd(txPayloadBitsPerFrame, "0").slice(0, txPayloadBitsPerFrame)
+    const indexBits = i.toString(2).padStart(32,"0")
+    const totalBits = txTotalFrames.toString(2).padStart(32,"0")
+    const nonceBits = txSessionNonce.toString(2).padStart(32,"0")
+    const reservedBits = "0".repeat(32)
+    const frame = indexBits + totalBits + nonceBits + reservedBits + payloadBits
+    // repetition for majority vote on the receiver
+    for(let r=0;r<3;r++) frames.push(frame)
+  }
+}
+
+function buildTxPackets(fileBytes, meta){
+  txPackets = []
+
+  const chunkSize = 240 // bytes; chosen to fit into one frame w/ headers
+  const totalChunks = Math.ceil(fileBytes.length / chunkSize)
+
+  // Meta packet: sent multiple times for robustness
+  const metaPkt = buildMetaPacket(meta, fileBytes.length, chunkSize, totalChunks)
+  for(let i=0;i<12;i++) txPackets.push(metaPkt)
+
+  // Data packets
+  const dataChunks = []
+  for(let i=0;i<totalChunks;i++){
+    const start = i * chunkSize
+    const end = Math.min(fileBytes.length, start + chunkSize)
+    const chunk = fileBytes.slice(start, end)
+    const pkt = buildDataPacket(i, totalChunks, chunk, chunkSize)
+    dataChunks.push({ i, chunk, pkt })
+    txPackets.push(pkt)
+  }
+
+  // Simple XOR parity FEC per group (erasure correction for 1 missing in group)
+  // For every group of G data chunks, add:
+  // - parityAll: XOR of all padded chunks
+  // - parityEO: XOR of even-indexed chunks (within group) (helps in some drop patterns)
+  const G = 10
+  for(let g=0; g<totalChunks; g+=G){
+    const group = dataChunks.slice(g, g+G)
+    if(group.length < 2) continue
+    const parityAll = xorChunks(group.map(x=>x.chunk), chunkSize)
+    const parityEO  = xorChunks(group.filter((_,idx)=>idx%2===0).map(x=>x.chunk), chunkSize)
+    txPackets.push(buildParityPacket(g, G, totalChunks, 0, parityAll, chunkSize))
+    txPackets.push(buildParityPacket(g, G, totalChunks, 1, parityEO, chunkSize))
+  }
+
+  // Randomize order for continuous broadcast; we reshuffle each full loop.
+  shuffleInPlace(txPackets)
+}
+
+function initParticles(){
+  // Precompute fixed screen-space carrier microdot layout.
+  particles = []
+  const pad = 16
+  const w = canvas.width - pad*2
+  const h = canvas.height - pad*2
+  const cellW = w / GRID
+  const cellH = h / GRID
+
+  const radiusSq = 0.70  // kept inside sphere; 0.78 left visible flickering arc at top
+  for(let gy=0; gy<GRID; gy++){
+    for(let gx=0; gx<GRID; gx++){
+      const nx = (gx / (GRID - 1)) * 2 - 1
+      const ny = (gy / (GRID - 1)) * 2 - 1
+      const rr = nx*nx + ny*ny
+      const inside = rr <= radiusSq
+      const z = inside ? Math.sqrt(Math.max(0, 1.0 - rr)) : 0
+      particles.push({
+        gx, gy,
+        x: pad + (gx + 0.5) * cellW,
+        y: pad + (gy + 0.5) * cellH,
+        inside,
+        z
+      })
+    }
+  }
+}
+
+function drawFinder(x,y,size){
+
+ctx.fillStyle="white"
+ctx.fillRect(x,y,size,size)
+
+}
+
+function drawFinders(){
+  const M = 26;
+  ctx.fillStyle="rgb(0,255,255)"; ctx.fillRect(0,0,M,M)
+  ctx.fillStyle="rgb(255,0,255)"; ctx.fillRect(canvas.width-M,0,M,M)
+  ctx.fillStyle="rgb(255,255,0)"; ctx.fillRect(0,canvas.height-M,M,M)
+  ctx.fillStyle="rgb(0,255,0)"; ctx.fillRect(canvas.width-M,canvas.height-M,M,M)
+}
+
+function startTxLoop(){
+  const runId = txRun
+  function loop(){
+    if(runId !== txRun) return
+
+    renderGalaxy(performance.now()*0.001)
+
+    ctx.clearRect(0,0,canvas.width,canvas.height)
+
+    drawFinders()
+
+    if(txFountain){
+      frames[0] = txFountain.nextFrameBits()
+      frameIndex = 0
+    }
+    let frame=frames[frameIndex]||""
+
+    // Stable screen-space carrier microdots (decodable layer).
+    // Background is WebGL “galaxy”; carrier provides the bits at high density.
+    ctx.globalCompositeOperation = "lighter"
+    for(let i=0;i<particles.length;i++){
+      const p = particles[i]
+      if(!p.inside) continue
+      const bit = frame[i] === "1"
+      // We draw ONLY “on” dots; “off” is absence.
+      if(!bit) continue
+
+      const r = 0.45 + 1.05*p.z
+      const t = performance.now()*0.001
+      const shimmer = 0.55 + 0.45*Math.sin(t*2.2 + (p.gx*0.07 + p.gy*0.11))
+      const a = (0.22 + 0.22*p.z) * shimmer
+      ctx.fillStyle = `rgba(255,255,255,${a})`
+      ctx.fillRect(p.x - r, p.y - r, r*2, r*2)
+    }
+    ctx.globalCompositeOperation = "source-over"
+
+    frameIndex=(frameIndex+1)%frames.length
+
+    // reshuffle on wrap to keep random order forever (legacy path)
+    if(frameIndex === 0 && frames.length && !txFountain){
+      shuffleInPlace(txPackets)
+      buildFramesFromPackets()
+    }
+
+    requestAnimationFrame(loop)
+  }
+  requestAnimationFrame(loop)
+}
+
+async function startDecoder(){
+
+hideModeButtons()
+fileInputEl.style.display = "none"
+if(chooseFileWrap) chooseFileWrap.style.display = "none"
+
+let stream=await navigator.mediaDevices.getUserMedia({video:true})
+
+video.srcObject=stream
+
+rxFountain = new FountainRx()
+setStatus("Decoding… point your camera at the transmitting screen. Auto-aligning…")
+decodeLoop()
+
+}
+
+let received={}
+let rxInterval = null
+
+const rxState = {
+  totalFrames: null,
+  gotFrames: new Set(),
+  lastBuiltKey: "",
+  meta: null,
+  fileId: null,
+  totalChunks: null,
+  chunkSize: null,
+  chunks: new Map(), // index -> Uint8Array
+  parity: [], // collected parity packets
+  reset(){
+    this.totalFrames = null
+    this.gotFrames = new Set()
+    this.lastBuiltKey = ""
+    this.meta = null
+    this.fileId = null
+    this.totalChunks = null
+    this.chunkSize = null
+    this.chunks = new Map()
+    this.parity = []
+  }
+}
+
+function decodeLoop(){
+  const vw = video.videoWidth || 0
+  const vh = video.videoHeight || 0
+  if(!vw || !vh){
+    requestAnimationFrame(decodeLoop)
+    return
+  }
+
+  // center-crop square for stability
+  const side = Math.min(vw, vh)
+  const sx = Math.floor((vw - side) / 2)
+  const sy = Math.floor((vh - side) / 2)
+
+  // small scan for marker detection
+  const detSize = 180
+  const scan = decodeLoop._scan || (decodeLoop._scan = document.createElement("canvas"))
+  scan.width = detSize
+  scan.height = detSize
+  const sctx = decodeLoop._sctx || (decodeLoop._sctx = scan.getContext("2d", { willReadFrequently:true }))
+  sctx.drawImage(video, sx, sy, side, side, 0,0, detSize, detSize)
+  const imgSmall = sctx.getImageData(0,0, detSize, detSize)
+  const cornersSmall = detectMarkers(imgSmall.data, detSize, detSize)
+
+  // medium sampling canvas for payload extraction
+  const sampSize = 720
+  const frame = decodeLoop._frame || (decodeLoop._frame = document.createElement("canvas"))
+  frame.width = sampSize
+  frame.height = sampSize
+  const fctx = decodeLoop._fctx || (decodeLoop._fctx = frame.getContext("2d", { willReadFrequently:true }))
+  fctx.drawImage(video, sx, sy, side, side, 0,0, sampSize, sampSize)
+  const img = fctx.getImageData(0,0, sampSize, sampSize)
+
+  const scale = sampSize / detSize
+  const corners = {
+    tl: {x: cornersSmall.tl.x*scale, y: cornersSmall.tl.y*scale},
+    tr: {x: cornersSmall.tr.x*scale, y: cornersSmall.tr.y*scale},
+    br: {x: cornersSmall.br.x*scale, y: cornersSmall.br.y*scale},
+    bl: {x: cornersSmall.bl.x*scale, y: cornersSmall.bl.y*scale},
+  }
+
+  const pkt = decodePacketFromFrame(img.data, sampSize, sampSize, corners)
+  if(pkt && rxFountain){
+    rxFountain.ingestPacket(pkt)
+    const prog = rxFountain.progress()
+    if(rxFountain.meta){
+      const pct = prog.need ? Math.floor((prog.have/prog.need)*100) : 0
+      setStatus(`Receiving “${rxFountain.meta.name}”: ${prog.have}/${prog.need} chunks (${pct}%).`)
+    }else{
+      setStatus("Locked signal. Waiting for metadata…")
+    }
+    if(rxFountain.isComplete()){
+      const bytes = rxFountain.buildFile()
+      const blob = new Blob([bytes], { type: rxFountain.meta?.type || "application/octet-stream" })
+      const url = URL.createObjectURL(blob)
+      const link = document.getElementById("download")
+      link.href = url
+      link.download = rxFountain.meta?.name || "recovered_file"
+      link.style.display = "block"
+      setStatus(`Recovered “${link.download}” (${bytes.length} bytes). You can download it now.`)
+      return
+    }
+  }
+
+  if(video.requestVideoFrameCallback){
+    video.requestVideoFrameCallback(()=>decodeLoop())
+  }else{
+    requestAnimationFrame(decodeLoop)
+  }
+}
+
+function majority(arr){
+
+let map={}
+
+arr.forEach(v=>map[v]=(map[v]||0)+1)
+
+return Object.keys(map).sort((a,b)=>map[b]-map[a])[0]
+
+}
+
+function attemptRebuild(){
+
+let keys=Object.keys(received)
+
+if(keys.length<3) return
+if(rxState.totalFrames != null && keys.length < Math.min(rxState.totalFrames, 10)) return
+
+let ordered=keys.map(Number).sort((a,b)=>a-b)
+
+// decode and ingest packets as they arrive (random order)
+for(const k of ordered){
+  const corrected = majority(received[k])
+  const bytes = bitsToBytes(corrected)
+  ingestPacket(bytes)
+}
+
+// try to recover missing chunks using parity
+attemptFecRecover()
+
+// if we have enough info, rebuild the file
+maybeFinalizeFile()
+
+}
+
+function setStatus(msg){
+  statusEl.textContent = msg || ""
+}
+
+function hideModeButtons(){
+  if(modeButtonsEl) modeButtonsEl.style.display = "none"
+}
+
+function progressText(prefix){
+  const total = rxState.totalFrames
+  const got = rxState.gotFrames.size
+  if(total == null) return (prefix ? prefix + " " : "") + `Frames captured: ${got}`
+  const pct = Math.floor((got/Math.max(1,total))*100)
+  return (prefix ? prefix + " " : "") + `Frames captured: ${got}/${total} (${pct}%)`
+}
+
+function bytesToBits(u8){
+  let out = ""
+  for(let i=0;i<u8.length;i++){
+    out += u8[i].toString(2).padStart(8,"0")
+  }
+  return out
+}
+
+function bitsToBytes(bitstream){
+  const bytes=[]
+  const n = bitstream.length - (bitstream.length % 8)
+  for(let i=0;i<n;i+=8){
+    bytes.push(parseInt(bitstream.substring(i,i+8),2))
+  }
+  return new Uint8Array(bytes)
+}
+
+function asciiToBytes(s){
+  const out = new Uint8Array(s.length)
+  for(let i=0;i<s.length;i++) out[i] = s.charCodeAt(i) & 0xff
+  return out
+}
+
+function u32ToBytesLE(n){
+  const b = new Uint8Array(4)
+  b[0] = n & 255
+  b[1] = (n>>>8) & 255
+  b[2] = (n>>>16) & 255
+  b[3] = (n>>>24) & 255
+  return b
+}
+
+function bytesToU32LE(b, off){
+  return (b[off] | (b[off+1]<<8) | (b[off+2]<<16) | (b[off+3]<<24)) >>> 0
+}
+
+function concatBytes(arrays){
+  let total = 0
+  arrays.forEach(a => total += a.length)
+  const out = new Uint8Array(total)
+  let off = 0
+  arrays.forEach(a => { out.set(a, off); off += a.length })
+  return out
+}
+
+function shuffleInPlace(arr){
+  for(let i=arr.length-1;i>0;i--){
+    const j = (Math.random()*(i+1))|0
+    const t = arr[i]; arr[i]=arr[j]; arr[j]=t
+  }
+}
+
+function crc32(u8){
+  // fast enough for these packet sizes
+  let c = 0xFFFFFFFF
+  for(let i=0;i<u8.length;i++){
+    c ^= u8[i]
+    for(let k=0;k<8;k++){
+      c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1)
+    }
+  }
+  return (c ^ 0xFFFFFFFF) >>> 0
+}
+
+function u16ToBytesLE(n){
+  const b = new Uint8Array(2)
+  b[0] = n & 255
+  b[1] = (n>>>8) & 255
+  return b
+}
+
+function bytesToU16LE(b, off){
+  return (b[off] | (b[off+1]<<8)) >>> 0
+}
+
+// Packet formats (bytes):
+// Common prefix: [MAGIC 4][kind u8][fileId u32][crc32 u32][...kind payload...]
+// kind=1 meta: [totalSize u32][chunkSize u16][totalChunks u32][nameLen u16][typeLen u16][name][type]
+// kind=2 data: [chunkIndex u32][totalChunks u32][dataLen u16][data...]
+// kind=3 parity: [groupStart u32][groupSize u16][totalChunks u32][scheme u8][dataLen u16][parityData...]
+function buildMetaPacket(meta, totalSize, chunkSize, totalChunks){
+  const nameBytes = asciiToBytes((meta.name || "recovered_file").slice(0, 255))
+  const typeBytes = asciiToBytes((meta.type || "application/octet-stream").slice(0, 255))
+  const kind = new Uint8Array([1])
+  const fileId = u32ToBytesLE(FILE_ID)
+  const body = concatBytes([
+    u32ToBytesLE(totalSize>>>0),
+    u16ToBytesLE(chunkSize>>>0),
+    u32ToBytesLE(totalChunks>>>0),
+    u16ToBytesLE(nameBytes.length),
+    u16ToBytesLE(typeBytes.length),
+    nameBytes,
+    typeBytes
+  ])
+  const withoutCrc = concatBytes([asciiToBytes(MAGIC), kind, fileId, u32ToBytesLE(0), body])
+  const crc = crc32(withoutCrc)
+  return concatBytes([asciiToBytes(MAGIC), kind, fileId, u32ToBytesLE(crc), body])
+}
+
+function buildDataPacket(chunkIndex, totalChunks, data, chunkSize){
+  const kind = new Uint8Array([2])
+  const fileId = u32ToBytesLE(FILE_ID)
+  const body = concatBytes([
+    u32ToBytesLE(chunkIndex>>>0),
+    u32ToBytesLE(totalChunks>>>0),
+    u16ToBytesLE(data.length),
+    data
+  ])
+  const withoutCrc = concatBytes([asciiToBytes(MAGIC), kind, fileId, u32ToBytesLE(0), body])
+  const crc = crc32(withoutCrc)
+  return concatBytes([asciiToBytes(MAGIC), kind, fileId, u32ToBytesLE(crc), body])
+}
+
+function buildParityPacket(groupStart, groupSize, totalChunks, scheme, parityData, chunkSize){
+  const kind = new Uint8Array([3])
+  const fileId = u32ToBytesLE(FILE_ID)
+  const body = concatBytes([
+    u32ToBytesLE(groupStart>>>0),
+    u16ToBytesLE(groupSize>>>0),
+    u32ToBytesLE(totalChunks>>>0),
+    new Uint8Array([scheme & 255]),
+    u16ToBytesLE(parityData.length),
+    parityData
+  ])
+  const withoutCrc = concatBytes([asciiToBytes(MAGIC), kind, fileId, u32ToBytesLE(0), body])
+  const crc = crc32(withoutCrc)
+  return concatBytes([asciiToBytes(MAGIC), kind, fileId, u32ToBytesLE(crc), body])
+}
+
+function xorChunks(chunks, chunkSize){
+  const out = new Uint8Array(chunkSize)
+  for(const c of chunks){
+    for(let i=0;i<chunkSize;i++){
+      out[i] ^= (c[i] || 0)
+    }
+  }
+  return out
+}
+
+function ingestPacket(pkt){
+  // minimal size: 4 + 1 + 4 + 4 = 13
+  if(pkt.length < 13) return
+  const magic = String.fromCharCode(pkt[0],pkt[1],pkt[2],pkt[3])
+  if(magic !== MAGIC) return
+  const kind = pkt[4]
+  const fileId = bytesToU32LE(pkt, 5)
+  const crc = bytesToU32LE(pkt, 9)
+
+  // validate CRC (computed with crc field set to 0)
+  const pktZero = pkt.slice()
+  pktZero[9]=0; pktZero[10]=0; pktZero[11]=0; pktZero[12]=0
+  const calc = crc32(pktZero)
+  if(calc !== crc) return
+
+  if(rxState.fileId == null) rxState.fileId = fileId
+  if(rxState.fileId !== fileId) return
+
+  let off = 13
+  if(kind === 1){
+    if(pkt.length < off + 4 + 2 + 4 + 2 + 2) return
+    const totalSize = bytesToU32LE(pkt, off); off+=4
+    const chunkSize = bytesToU16LE(pkt, off); off+=2
+    const totalChunks = bytesToU32LE(pkt, off); off+=4
+    const nameLen = bytesToU16LE(pkt, off); off+=2
+    const typeLen = bytesToU16LE(pkt, off); off+=2
+    if(pkt.length < off + nameLen + typeLen) return
+    const name = String.fromCharCode(...pkt.slice(off, off+nameLen)); off+=nameLen
+    const type = String.fromCharCode(...pkt.slice(off, off+typeLen)); off+=typeLen
+    rxState.meta = { name, type, size: totalSize }
+    rxState.totalChunks = totalChunks
+    rxState.chunkSize = chunkSize
+  } else if(kind === 2){
+    if(pkt.length < off + 4 + 4 + 2) return
+    const chunkIndex = bytesToU32LE(pkt, off); off+=4
+    const totalChunks = bytesToU32LE(pkt, off); off+=4
+    const dataLen = bytesToU16LE(pkt, off); off+=2
+    if(pkt.length < off + dataLen) return
+    const data = pkt.slice(off, off+dataLen)
+    if(!rxState.totalChunks) rxState.totalChunks = totalChunks
+    if(rxState.totalChunks !== totalChunks) return
+    if(rxState.chunks.has(chunkIndex)) return
+    rxState.chunks.set(chunkIndex, data)
+  } else if(kind === 3){
+    if(pkt.length < off + 4 + 2 + 4 + 1 + 2) return
+    const groupStart = bytesToU32LE(pkt, off); off+=4
+    const groupSize = bytesToU16LE(pkt, off); off+=2
+    const totalChunks = bytesToU32LE(pkt, off); off+=4
+    const scheme = pkt[off]; off+=1
+    const dataLen = bytesToU16LE(pkt, off); off+=2
+    if(pkt.length < off + dataLen) return
+    const data = pkt.slice(off, off+dataLen)
+    rxState.parity.push({ groupStart, groupSize, totalChunks, scheme, data })
+    if(!rxState.totalChunks) rxState.totalChunks = totalChunks
+  }
+}
+
+function attemptFecRecover(){
+  // Recover at most a few per call to keep UI smooth
+  if(!rxState.chunkSize || !rxState.totalChunks) return
+  let recovered = 0
+  for(const p of rxState.parity){
+    if(recovered > 8) break
+    const start = p.groupStart
+    const end = Math.min(rxState.totalChunks, start + p.groupSize)
+    // only supports scheme 0 (all) for single-missing recovery
+    if(p.scheme !== 0) continue
+    const present = []
+    let missing = -1
+    for(let i=start;i<end;i++){
+      const c = rxState.chunks.get(i)
+      if(c) present.push({ idx:i, data:c })
+      else missing = (missing === -1) ? i : -2
+    }
+    if(missing < 0) continue
+    const xor = xorChunks(present.map(x=>x.data), rxState.chunkSize)
+    // xor with parity to get missing (parityAll = xor(all))
+    const out = new Uint8Array(rxState.chunkSize)
+    for(let i=0;i<rxState.chunkSize;i++){
+      out[i] = xor[i] ^ (p.data[i] || 0)
+    }
+    // trim later using meta.size
+    rxState.chunks.set(missing, out)
+    recovered++
+  }
+}
+
+function maybeFinalizeFile(){
+  if(!rxState.meta || !rxState.totalChunks || !rxState.chunkSize) {
+    setStatus(progressText())
+    return
+  }
+  const got = rxState.chunks.size
+  const need = rxState.totalChunks
+  const pct = Math.floor((got/Math.max(1,need))*100)
+  setStatus(`Receiving “${rxState.meta.name}”: chunks ${got}/${need} (${pct}%).`)
+  if(got < need) return
+
+  // stitch chunks in order and trim to declared size
+  const parts = []
+  for(let i=0;i<need;i++){
+    const c = rxState.chunks.get(i) || new Uint8Array(0)
+    parts.push(c)
+  }
+  let merged = concatBytes(parts)
+  merged = merged.slice(0, rxState.meta.size)
+
+  const blob = new Blob([merged], { type: rxState.meta.type || "application/octet-stream" })
+  const url = URL.createObjectURL(blob)
+  const link = document.getElementById("download")
+  link.href = url
+  link.download = rxState.meta.name || "recovered_file"
+  link.style.display = "block"
+  setStatus(`Recovered “${link.download}” (${rxState.meta.size} bytes). You can download it now.`)
+}
+
+</script>
+
+</body>
+</html>
