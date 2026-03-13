@@ -874,12 +874,22 @@ function drawFinders(){
   const centerX = pad + (GRID - 1) * 0.5 * cellW;
   const centerY = pad + (GRID - 1) * 0.5 * cellH;
   const radiusPx = Math.sqrt(0.70) * (GRID - 1) * 0.5 * cellW;
-  const inset = Math.round(centerX - radiusPx - M * 0.5);
+  const extraGap = 10; // push finders slightly farther from particle circle
+  const inset = Math.round(centerX - radiusPx - M * 0.5 - extraGap);
   const x1 = inset, x2 = canvas.width - inset - M, y1 = inset, y2 = canvas.height - inset - M;
   ctx.fillStyle="rgb(0,255,255)"; ctx.fillRect(x1,y1,M,M)
   ctx.fillStyle="rgb(255,0,255)"; ctx.fillRect(x2,y1,M,M)
   ctx.fillStyle="rgb(255,255,0)"; ctx.fillRect(x1,y2,M,M)
   ctx.fillStyle="rgb(0,255,0)"; ctx.fillRect(x2,y2,M,M)
+  // High-contrast frame around the particle cloud + finders to help phone autofocus
+  const framePad = 12;
+  const fx = x1 - framePad;
+  const fy = y1 - framePad;
+  const fw = (x2 + M + framePad) - fx;
+  const fh = (y2 + M + framePad) - fy;
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = "rgba(255,255,255,0.7)";
+  ctx.strokeRect(fx, fy, fw, fh);
 }
 
 function startTxLoop(){
@@ -941,12 +951,29 @@ if(canvasWrapEl) canvasWrapEl.style.display = "none"
 decodeFacingMode = "environment"
 let stream = null
 try {
-  stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:"environment"}}})
+  stream = await navigator.mediaDevices.getUserMedia({
+    video:{
+      facingMode:{ideal:"environment"},
+      width:{ideal:1280},
+      height:{ideal:720}
+    }
+  })
 } catch (_) {
   try {
-    stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:"environment"}})
+    stream = await navigator.mediaDevices.getUserMedia({
+      video:{
+        facingMode:"environment",
+        width:{ideal:1280},
+        height:{ideal:720}
+      }
+    })
   } catch (__) {
-    stream = await navigator.mediaDevices.getUserMedia({video:true})
+    stream = await navigator.mediaDevices.getUserMedia({
+      video:{
+        width:{ideal:1280},
+        height:{ideal:720}
+      }
+    })
     decodeFacingMode = "user"
   }
 }
@@ -976,9 +1003,23 @@ decodeSwitchCameraBtn.addEventListener("click", async ()=>{
   const next = decodeFacingMode === "environment" ? "user" : "environment"
   let stream = null
   try {
-    stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:next}}})
+    stream = await navigator.mediaDevices.getUserMedia({
+      video:{
+        facingMode:{ideal:next},
+        width:{ideal:1280},
+        height:{ideal:720}
+      }
+    })
   } catch (_) {
-    try { stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:next}}) } catch (__) {}
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video:{
+          facingMode:next,
+          width:{ideal:1280},
+          height:{ideal:720}
+        }
+      })
+    } catch (__) {}
   }
   if(!stream) return
   decodeStream.getTracks().forEach(t=>t.stop())
