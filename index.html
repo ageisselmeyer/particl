@@ -81,9 +81,9 @@ margin-top:0;
 #tx{ background:transparent; }
 
 video{
-width:100%;
+width:min(100vw,560px);
 max-width:100%;
-max-height:80vh;
+max-height:min(80vh,100vw);
 margin-top:20px;
 border-radius:10px;
 object-fit:contain;
@@ -127,9 +127,6 @@ font-size:18px;
 <br>
 
 <video id="video" autoplay playsinline style="display:none"></video>
-<div id="decodeCameraWrap" style="display:none; margin-top:8px;">
-  <button type="button" id="decodeSwitchCamera">Use back camera</button>
-</div>
 
 <br>
 
@@ -164,12 +161,8 @@ const canvasWrapEl = document.getElementById("canvasWrap")
 const decodeProgressWrap = document.getElementById("decodeProgressWrap")
 const decodeProgressBar = document.getElementById("decodeProgressBar")
 const decodeProgressText = document.getElementById("decodeProgressText")
-const decodeCameraWrap = document.getElementById("decodeCameraWrap")
-const decodeSwitchCameraBtn = document.getElementById("decodeSwitchCamera")
 let decodeRateSamples = []  // { t, have } for ETA
 let decodeFramesReceived = 0  // count decoded frames (so user sees activity before meta)
-let decodeStream = null
-let decodeFacingMode = "environment"
 
 const GRID = 200 // sampled raster resolution on decoder (high bandwidth)
 const FRAME_BITS = GRID * GRID
@@ -948,7 +941,6 @@ fileInputEl.style.display = "none"
 if(chooseFileWrap) chooseFileWrap.style.display = "none"
 if(canvasWrapEl) canvasWrapEl.style.display = "none"
 
-decodeFacingMode = "environment"
 let stream = null
 try {
   stream = await navigator.mediaDevices.getUserMedia({
@@ -974,17 +966,12 @@ try {
         height:{ideal:720}
       }
     })
-    decodeFacingMode = "user"
   }
 }
 if(!stream) { setStatus("Could not access camera."); return }
 
-if(decodeStream) { decodeStream.getTracks().forEach(t=>t.stop()); decodeStream = null }
-decodeStream = stream
 video.srcObject = stream
 video.style.display = "block"
-if(decodeCameraWrap) decodeCameraWrap.style.display = "block"
-if(decodeSwitchCameraBtn) decodeSwitchCameraBtn.textContent = decodeFacingMode === "environment" ? "Switch to front camera" : "Use back camera"
 
 rxFountain = new FountainRx()
 decodeRateSamples = []
@@ -992,43 +979,9 @@ decodeFramesReceived = 0
 if(decodeProgressWrap) decodeProgressWrap.style.display = "block"
 if(decodeProgressBar) decodeProgressBar.style.width = "0%"
 if(decodeProgressText) decodeProgressText.textContent = ""
-setStatus(decodeFacingMode === "environment" ? "Decoding… Point back camera at the screen." : "Decoding… Using front camera – tap «Use back camera» to point at screen.")
+setStatus("Decoding… Point your camera at the transmitting screen.")
 decodeLoop()
 
-}
-
-if(decodeSwitchCameraBtn){
-decodeSwitchCameraBtn.addEventListener("click", async ()=>{
-  if(!decodeStream || !video.srcObject) return
-  const next = decodeFacingMode === "environment" ? "user" : "environment"
-  let stream = null
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      video:{
-        facingMode:{ideal:next},
-        width:{ideal:1280},
-        height:{ideal:720}
-      }
-    })
-  } catch (_) {
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        video:{
-          facingMode:next,
-          width:{ideal:1280},
-          height:{ideal:720}
-        }
-      })
-    } catch (__) {}
-  }
-  if(!stream) return
-  decodeStream.getTracks().forEach(t=>t.stop())
-  decodeStream = stream
-  decodeFacingMode = next
-  video.srcObject = stream
-  decodeSwitchCameraBtn.textContent = next === "environment" ? "Switch to front camera" : "Use back camera"
-  setStatus(next === "environment" ? "Decoding… Point back camera at the screen." : "Decoding… Using front camera – tap «Use back camera» to point at screen.")
-})
 }
 
 let received={}
