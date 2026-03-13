@@ -83,9 +83,12 @@ border-radius:16px;
 #tx{ background:transparent; }
 
 video{
-width:440px;
+width:100%;
+max-width:100%;
+max-height:80vh;
 margin-top:20px;
 border-radius:10px;
+object-fit:contain;
 }
 
 #download{
@@ -122,7 +125,7 @@ font-size:18px;
 
 <br>
 
-<video id="video" autoplay playsinline></video>
+<video id="video" autoplay playsinline style="display:none"></video>
 
 <br>
 
@@ -146,6 +149,7 @@ const chooseFileWrap = document.getElementById("chooseFileWrap")
 const chooseFileBtn = document.getElementById("chooseFileBtn")
 chooseFileBtn.addEventListener("click", () => fileInputEl.click())
 const modeButtonsEl = document.getElementById("modeButtons")
+const canvasWrapEl = document.getElementById("canvasWrap")
 
 const GRID = 200 // sampled raster resolution on decoder (high bandwidth)
 const FRAME_BITS = GRID * GRID
@@ -898,6 +902,7 @@ async function startDecoder(){
 hideModeButtons()
 fileInputEl.style.display = "none"
 if(chooseFileWrap) chooseFileWrap.style.display = "none"
+if(canvasWrapEl) canvasWrapEl.style.display = "none"
 
 let stream
 try {
@@ -907,6 +912,7 @@ try {
 }
 
 video.srcObject=stream
+video.style.display="block"
 
 rxFountain = new FountainRx()
 setStatus("Decoding… point your camera at the transmitting screen. Auto-aligning…")
