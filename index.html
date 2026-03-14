@@ -80,17 +80,28 @@ margin-top:0;
 #bg{ background:black; }
 #tx{ background:transparent; }
 
-video{
+#videoWrap{
+position:relative;
 width:min(90vw,480px);
-height:min(90vw,480px); /* force square on Safari/iOS */
-max-width:100%;
-max-height:80vh;
+height:min(90vw,480px); /* square box for camera */
+margin:20px auto 0;
+}
+
+#videoWrap > video{
+width:100%;
+height:100%;
 display:block;
-margin-top:20px;
-margin-left:auto;
-margin-right:auto;
 border-radius:10px;
 object-fit:contain;
+}
+
+#videoOverlay{
+position:absolute;
+left:0;
+top:0;
+width:100%;
+height:100%;
+pointer-events:none;
 }
 
 #download{
@@ -130,7 +141,10 @@ font-size:18px;
 
 <br>
 
-<video id="video" autoplay playsinline style="display:none"></video>
+<div id="videoWrap">
+  <video id="video" autoplay playsinline style="display:none"></video>
+  <canvas id="videoOverlay"></canvas>
+</div>
 <div id="decodeProgressWrap" style="display:none; margin-top:8px; max-width:360px; margin-left:auto; margin-right:auto;">
   <div id="decodeProgressBarBg" style="height:10px; background:rgba(255,255,255,0.12); border-radius:6px; overflow:hidden;">
     <div id="decodeProgressBar" style="height:100%; width:0%; background:linear-gradient(90deg, rgba(100,180,255,0.9), rgba(140,220,255,0.95)); border-radius:6px; transition:width 0.2s;"></div>
@@ -152,6 +166,8 @@ const gl = bgCanvas.getContext("webgl2", { antialias:false, alpha:false, premult
 let galaxy = null
 
 const video = document.getElementById("video")
+const videoOverlay = document.getElementById("videoOverlay")
+const videoOverlayCtx = videoOverlay ? videoOverlay.getContext("2d") : null
 const statusEl = document.getElementById("status")
 const fileInputEl = document.getElementById("fileInput")
 const chooseFileWrap = document.getElementById("chooseFileWrap")
@@ -165,7 +181,7 @@ const decodeProgressText = document.getElementById("decodeProgressText")
 let decodeRateSamples = []  // { t, have } for ETA
 let decodeFramesReceived = 0  // count decoded frames (so user sees activity before meta)
 
-const GRID = 200 // sampled raster resolution on decoder (high bandwidth)
+const GRID = 80 // reduced for easier decoding; fewer, larger cells
 const FRAME_BITS = GRID * GRID
 const SYNC = "1100110011110000101010101100110011001100111100001010101011001100" // 64-bit sync marker
 const MAGIC = "VTX2" // 4 bytes (32 bits)
@@ -861,7 +877,7 @@ ctx.fillRect(x,y,size,size)
 }
 
 function drawFinders(){
-  const M = 26;
+  const M = 32;
   const pad = 16;
   const w = canvas.width - pad*2, h = canvas.height - pad*2;
   const cellW = w / GRID, cellH = h / GRID;
@@ -891,8 +907,6 @@ function startTxLoop(){
   function loop(){
     if(runId !== txRun) return
 
-    renderGalaxy(performance.now()*0.001)
-
     ctx.clearRect(0,0,canvas.width,canvas.height)
 
     drawFinders()
@@ -904,7 +918,7 @@ function startTxLoop(){
     let frame=frames[frameIndex]||""
 
     // Stable screen-space carrier microdots (decodable layer).
-    // Background is WebGL “galaxy”; carrier provides the bits at high density.
+    // Use bright, steady dots (no shimmer) for maximum visibility.
     ctx.globalCompositeOperation = "lighter"
     for(let i=0;i<particles.length;i++){
       const p = particles[i]
@@ -913,10 +927,8 @@ function startTxLoop(){
       // We draw ONLY “on” dots; “off” is absence.
       if(!bit) continue
 
-      const r = (0.45 + 1.05*p.z) * 0.78
-      const t = performance.now()*0.001
-      const shimmer = 0.55 + 0.45*Math.sin(t*2.2 + (p.gx*0.07 + p.gy*0.11))
-      const a = (0.22 + 0.22*p.z) * shimmer
+      const r = 1.0 + 1.4*p.z
+      const a = 0.4 + 0.4*p.z
       ctx.fillStyle = `rgba(255,255,255,${a})`
       ctx.fillRect(p.x - r, p.y - r, r*2, r*2)
     }
@@ -1033,6 +1045,30 @@ function decodeLoop(){
   sctx.drawImage(video, sx, sy, side, side, 0,0, detSize, detSize)
   const imgSmall = sctx.getImageData(0,0, detSize, detSize)
   const cornersSmall = detectMarkers(imgSmall.data, detSize, detSize)
+
+  // Visualize detected finder corners on top of the camera view
+  if(videoOverlay && videoOverlayCtx && cornersSmall){
+    const ow = videoOverlay.clientWidth || videoOverlay.width || 0
+    const oh = videoOverlay.clientHeight || videoOverlay.height || 0
+    if(ow && oh){
+      if(videoOverlay.width !== ow) videoOverlay.width = ow
+      if(videoOverlay.height !== oh) videoOverlay.height = oh
+      const ctxO = videoOverlayCtx
+      ctxO.clearRect(0,0,ow,oh)
+      const drawBox = (pt, color) => {
+        const x = pt.x / detSize * ow
+        const y = pt.y / detSize * oh
+        const sz = Math.max(12, ow * 0.08)
+        ctxO.strokeStyle = color
+        ctxO.lineWidth = 2
+        ctxO.strokeRect(x - sz/2, y - sz/2, sz, sz)
+      }
+      drawBox(cornersSmall.tl, "rgba(0,255,0,0.9)")
+      drawBox(cornersSmall.tr, "rgba(0,255,0,0.9)")
+      drawBox(cornersSmall.br, "rgba(0,255,0,0.9)")
+      drawBox(cornersSmall.bl, "rgba(0,255,0,0.9)")
+    }
+  }
 
   // medium sampling canvas for payload extraction
   const sampSize = 720
