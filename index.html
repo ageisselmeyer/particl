@@ -513,7 +513,10 @@ class FountainTx{
     this.seq++
     const payloadBits = bytesToBits(pkt)
     const needed = FRAME_BITS - SYNC.length
-    const clipped = payloadBits.padEnd(needed, "0").slice(0, needed)
+    // Fill to full frame by repeating payload (not zero-pad) so the whole circle shows dots
+    let clipped = payloadBits
+    while (clipped.length < needed) clipped += payloadBits.slice(0, needed - clipped.length)
+    clipped = clipped.slice(0, needed)
     return (SYNC + clipped).padEnd(FRAME_BITS, "0").slice(0, FRAME_BITS)
   }
 }
