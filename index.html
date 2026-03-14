@@ -121,7 +121,7 @@ font-size:18px;
 
 <body>
 
-<h2>PartiCl v2.01</h2>
+<h2>PartiCl v2.02</h2>
 
 <input type="file" id="fileInput" style="display:none">
 
@@ -874,15 +874,32 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
       if(!CARRIER_MASK[gridIdx]) continue
       const u=(x+0.5)/GRID, v=(y+0.5)/GRID
       const p=mapPoint(inv,u,v)
-      const px=Math.max(0,Math.min(w-1,Math.floor(p.x)))
-      const py=Math.max(0,Math.min(h-1,Math.floor(p.y)))
-      const ii=(py*w+px)*4
-      const r=img[ii], g=img[ii+1], b=img[ii+2]
-      const L=(0.2126*r + 0.7152*g + 0.0722*b)/255
+      const px=Math.max(1,Math.min(w-2,Math.floor(p.x)))
+      const py=Math.max(1,Math.min(h-2,Math.floor(p.y)))
+      // Use local-maximum luminance in a 3x3 patch so tiny bright dots survive blur/jitter.
+      let L = 0
+      for(let oy=-1; oy<=1; oy++){
+        for(let ox=-1; ox<=1; ox++){
+          const sx = px + ox
+          const sy = py + oy
+          const ii=(sy*w+sx)*4
+          const r=img[ii], g=img[ii+1], b=img[ii+2]
+          const l=(0.2126*r + 0.7152*g + 0.0722*b)/255
+          if(l > L) L = l
+        }
+      }
       lum[idx++] = L
       if(L<min) min=L
       if(L>max) max=L
     }
+  }
+  if(max - min < 0.03){
+    if(dbg && dbg.packet){
+      dbg.packet.minL = min
+      dbg.packet.maxL = max
+      dbg.packet.reason = "low-contrast"
+    }
+    return null
   }
   // Otsu threshold on luminance (robust to exposure shifts)
   const bins = 64
@@ -912,20 +929,28 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
       thrBin = i
     }
   }
-  const thr = (thrBin + 0.5) / bins
-  let bits=""
-  for(let i=0;i<lum.length;i++) bits += (lum[i] > thr) ? "1":"0"
-  let syncMatch = 0
-  let syncMatchInv = 0
-  for(let i=0;i<SYNC.length;i++){
-    if(bits[i] === SYNC[i]) syncMatch++
-    else syncMatchInv++
+  const otsuThr = (thrBin + 0.5) / bins
+  const candidates = [-0.12,-0.08,-0.04,0,0.04,0.08,0.12].map(d=>Math.max(0.02, Math.min(0.98, otsuThr + d)))
+  let best = { match: -1, bits: "", syncMatch: 0, syncMatchInv: 0, useInv: false, thr: otsuThr }
+  for(const thr of candidates){
+    let bits=""
+    for(let i=0;i<lum.length;i++) bits += (lum[i] > thr) ? "1":"0"
+    let raw = 0
+    for(let i=0;i<SYNC.length;i++) if(bits[i] === SYNC[i]) raw++
+    const invScore = SYNC.length - raw
+    const useInv = invScore > raw
+    const match = Math.max(raw, invScore)
+    if(match > best.match){
+      best = { match, bits, syncMatch: raw, syncMatchInv: invScore, useInv, thr }
+    }
   }
-  if(syncMatchInv > syncMatch){
+  let bits = best.bits
+  let syncMatch = best.useInv ? best.syncMatchInv : best.syncMatch
+  let syncMatchInv = best.syncMatchInv
+  if(best.useInv){
     let invBits = ""
     for(let i=0;i<bits.length;i++) invBits += bits[i] === "1" ? "0" : "1"
     bits = invBits
-    syncMatch = syncMatchInv
     if(dbg && dbg.packet) dbg.packet.syncUsed = "inverted"
   }else{
     if(dbg && dbg.packet) dbg.packet.syncUsed = "normal"
@@ -933,7 +958,7 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
   if(dbg && dbg.packet){
     dbg.packet.minL = min
     dbg.packet.maxL = max
-    dbg.packet.thr = thr
+    dbg.packet.thr = best.thr
     dbg.packet.syncMatch = syncMatch
     dbg.packet.syncMatchInv = syncMatchInv
   }
