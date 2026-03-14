@@ -731,7 +731,11 @@ function mapPoint(H, x, y){
 }
 
 function decodePacketFromFrame(img, w, h, corners){
-  const src = [corners.tl, corners.tr, corners.br, corners.bl].map(p=>({x:p.x,y:p.y}))
+  const raw = [corners.tl, corners.tr, corners.br, corners.bl].map(p=>({x:p.x,y:p.y}))
+  const cx = (raw[0].x+raw[1].x+raw[2].x+raw[3].x)/4
+  const cy = (raw[0].y+raw[1].y+raw[2].y+raw[3].y)/4
+  const inset = 0.72
+  const src = raw.map(p=>({ x: cx + (p.x - cx) * inset, y: cy + (p.y - cy) * inset }))
   const dst = [{x:0,y:0},{x:1,y:0},{x:1,y:1},{x:0,y:1}]
   const H = computeHomography(src, dst)
   const inv = invertHomography(H)
