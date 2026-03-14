@@ -417,7 +417,8 @@ class FountainTx{
     this.meta = meta
     this.fileBytes = fileBytes
     this.fileId = (crypto && crypto.getRandomValues) ? crypto.getRandomValues(new Uint32Array(1))[0]>>>0 : ((Math.random()*2**32)>>>0)
-    this.chunkSize = 1024
+    const maxPayload = (FRAME_BITS - SYNC.length) / 8 - 30
+    this.chunkSize = Math.min(1024, Math.max(256, (maxPayload / 2) | 0))
     this.K = Math.ceil(fileBytes.length / this.chunkSize)
     this.chunks = new Array(this.K)
     for(let i=0;i<this.K;i++){
@@ -540,14 +541,16 @@ class FountainRx{
     const kind = pkt[4]
     if(kind === 1){
       let off = 5
-      if(pkt.length < off + 4+4+2+4+2+2+4) return
+      if(pkt.length < off + 4+4+2+4+2+2) return
       const fileId = bytesToU32LE(pkt, off); off+=4
       const totalSize = bytesToU32LE(pkt, off); off+=4
       const chunkSize = bytesToU16LE(pkt, off); off+=2
       const K = bytesToU32LE(pkt, off); off+=4
       const nameLen = bytesToU16LE(pkt, off); off+=2
       const typeLen = bytesToU16LE(pkt, off); off+=2
-      if(pkt.length < off + nameLen + typeLen + 4) return
+      const pktLen = off + nameLen + typeLen + 4
+      if(pkt.length < pktLen) return
+      pkt = pkt.slice(0, pktLen)
       const name = String.fromCharCode(...pkt.slice(off, off+nameLen)); off += nameLen
       const type = String.fromCharCode(...pkt.slice(off, off+typeLen)); off += typeLen
       const crc = bytesToU32LE(pkt, off); off += 4
@@ -576,7 +579,9 @@ class FountainRx{
       const K = bytesToU32LE(pkt, off); off+=4
       const chunkSize = bytesToU16LE(pkt, off); off+=2
       const payloadLen = bytesToU16LE(pkt, off); off+=2
-      if(pkt.length < off + payloadLen + 4) return
+      const pktLen = off + payloadLen + 4
+      if(pkt.length < pktLen) return
+      pkt = pkt.slice(0, pktLen)
       const payload = pkt.slice(off, off+payloadLen); off += payloadLen
       const crc = bytesToU32LE(pkt, off); off+=4
       const calc = crc32(pkt.slice(0, pkt.length-4))
@@ -789,7 +794,9 @@ function decodePacketFromFrame(img, w, h, corners){
   const thr = (thrBin + 0.5) / bins
   let bits=""
   for(let i=0;i<lum.length;i++) bits += (lum[i] > thr) ? "1":"0"
-  if(bits.slice(0, SYNC.length) !== SYNC) return null
+  let syncMatch = 0
+  for(let i=0;i<SYNC.length;i++) if(bits[i] === SYNC[i]) syncMatch++
+  if(syncMatch < 60) return null
   return bitsToBytes(bits.slice(SYNC.length))
 }
 
