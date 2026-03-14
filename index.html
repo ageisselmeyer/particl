@@ -704,14 +704,20 @@ function detectMarkers(img, w, h){
   // Finders are color-coded by corner; search each color in its expected quadrant.
   const mx = (w * 0.5) | 0
   const my = (h * 0.5) | 0
-  const cyan = bestInRegion(0,  mx, 0,  my, (r,g,b)=> (g+b) - r)
-  const mag  = bestInRegion(mx, w,  0,  my, (r,g,b)=> (r+b) - g)
-  const yel  = bestInRegion(0,  mx, my, h,  (r,g,b)=> (r+g) - b)
-  const grn  = bestInRegion(mx, w,  my, h,  (r,g,b)=> g - (r*0.5 + b*0.5))
+  // Use channel-dominance scoring so white/gray background does not win.
+  const cyan = bestInRegion(0,  mx, 0,  my, (r,g,b)=> Math.min(g, b) - r)
+  const mag  = bestInRegion(mx, w,  0,  my, (r,g,b)=> Math.min(r, b) - g)
+  const yel  = bestInRegion(0,  mx, my, h,  (r,g,b)=> Math.min(r, g) - b)
+  const grn  = bestInRegion(mx, w,  my, h,  (r,g,b)=> g - Math.max(r, b))
 
   // Keep gates permissive so we lock quickly on real finder colors under varied exposure.
-  if(cyan.s < 35 || mag.s < 35 || yel.s < 35 || grn.s < 20) return null
-  return { tl: cyan, tr: mag, bl: yel, br: grn }
+  if(cyan.s < 18 || mag.s < 18 || yel.s < 18 || grn.s < 14) return null
+  const tl = cyan, tr = mag, bl = yel, br = grn
+  if(!(tl.x < tr.x && bl.x < br.x && tl.y < bl.y && tr.y < br.y)) return null
+  const d = (a, b) => Math.hypot(a.x - b.x, a.y - b.y)
+  const minSpan = Math.min(d(tl, tr), d(bl, br), d(tl, bl), d(tr, br))
+  if(minSpan < Math.min(w, h) * 0.18) return null
+  return { tl, tr, bl, br }
 }
 
 function computeHomography(src, dst){
@@ -819,8 +825,18 @@ function decodePacketFromFrame(img, w, h, corners){
   let bits=""
   for(let i=0;i<lum.length;i++) bits += (lum[i] > thr) ? "1":"0"
   let syncMatch = 0
-  for(let i=0;i<SYNC.length;i++) if(bits[i] === SYNC[i]) syncMatch++
-  if(syncMatch < 60) return null
+  let syncMatchInv = 0
+  for(let i=0;i<SYNC.length;i++){
+    if(bits[i] === SYNC[i]) syncMatch++
+    else syncMatchInv++
+  }
+  if(syncMatchInv > syncMatch){
+    let invBits = ""
+    for(let i=0;i<bits.length;i++) invBits += bits[i] === "1" ? "0" : "1"
+    bits = invBits
+    syncMatch = syncMatchInv
+  }
+  if(syncMatch < 52) return null
   return bitsToBytes(bits.slice(SYNC.length))
 }
 
@@ -1096,7 +1112,7 @@ function decodeLoop(){
   const sy = Math.floor((vh - side) / 2)
 
   // small scan for marker detection
-  const detSize = 180
+  const detSize = 280
   const scan = decodeLoop._scan || (decodeLoop._scan = document.createElement("canvas"))
   scan.width = detSize
   scan.height = detSize
