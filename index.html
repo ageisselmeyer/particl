@@ -106,6 +106,7 @@ z-index:0;
 
 #finderOverlay{ position:absolute; left:0; top:0; width:100%; height:100%; pointer-events:none; z-index:1; }
 .finder-box{ position:absolute; border:2px solid rgba(0,255,0,0.9); box-sizing:border-box; display:none; }
+#particleCloudBox{ position:absolute; border:2px solid rgba(0,255,0,0.85); box-sizing:border-box; display:none; pointer-events:none; }
 
 #download{
 display:none;
@@ -144,9 +145,10 @@ font-size:18px;
 
 <br>
 
-<div id="videoWrap">
-  <video id="video" autoplay playsinline style="display:none"></video>
+<div id="videoWrap" style="display:none">
+  <video id="video" autoplay playsinline></video>
   <div id="finderOverlay">
+    <div id="particleCloudBox"></div>
     <div class="finder-box" id="finderTL"></div>
     <div class="finder-box" id="finderTR"></div>
     <div class="finder-box" id="finderBR"></div>
@@ -179,6 +181,7 @@ const finderTL = document.getElementById("finderTL")
 const finderTR = document.getElementById("finderTR")
 const finderBR = document.getElementById("finderBR")
 const finderBL = document.getElementById("finderBL")
+const particleCloudBoxEl = document.getElementById("particleCloudBox")
 const statusEl = document.getElementById("status")
 const fileInputEl = document.getElementById("fileInput")
 const chooseFileWrap = document.getElementById("chooseFileWrap")
@@ -913,8 +916,12 @@ function drawFinders(){
   ctx.strokeRect(fx, fy, fw, fh);
 }
 
+const TX_FRAME_HOLD = 30  // show each data frame for 30 refresh cycles (~0.5s at 60Hz) = 2 frames per second
+let txHoldCounter = 0
+
 function startTxLoop(){
   const runId = txRun
+  txHoldCounter = 0
   function loop(){
     if(runId !== txRun) return
 
@@ -923,8 +930,13 @@ function startTxLoop(){
     drawFinders()
 
     if(txFountain){
-      frames[0] = txFountain.nextFrameBits()
-      frameIndex = 0
+      if(txHoldCounter <= 0){
+        frames[0] = txFountain.nextFrameBits()
+        frameIndex = 0
+        txHoldCounter = TX_FRAME_HOLD
+      } else {
+        txHoldCounter--
+      }
     }
     let frame=frames[frameIndex]||""
 
@@ -945,12 +957,12 @@ function startTxLoop(){
     }
     ctx.globalCompositeOperation = "source-over"
 
-    frameIndex=(frameIndex+1)%frames.length
-
-    // reshuffle on wrap to keep random order forever (legacy path)
-    if(frameIndex === 0 && frames.length && !txFountain){
-      shuffleInPlace(txPackets)
-      buildFramesFromPackets()
+    if(!txFountain){
+      frameIndex=(frameIndex+1)%frames.length
+      if(frameIndex === 0 && frames.length){
+        shuffleInPlace(txPackets)
+        buildFramesFromPackets()
+      }
     }
 
     requestAnimationFrame(loop)
@@ -995,7 +1007,7 @@ try {
 if(!stream) { setStatus("Could not access camera."); return }
 
 video.srcObject = stream
-video.style.display = "block"
+if(videoWrapEl) videoWrapEl.style.display = "block"
 
 rxFountain = new FountainRx()
 decodeRateSamples = []
@@ -1057,28 +1069,40 @@ function decodeLoop(){
   const imgSmall = sctx.getImageData(0,0, detSize, detSize)
   const cornersSmall = detectMarkers(imgSmall.data, detSize, detSize)
 
-  // Visualize detected finder corners as small divs (no canvas over video so feed stays visible)
+  // Visualize detected finder corners and particle cloud region (no canvas over video so feed stays visible)
   const finderBoxes = cornersSmall && videoWrapEl ? [finderTL, finderTR, finderBR, finderBL] : []
   const pts = cornersSmall ? [cornersSmall.tl, cornersSmall.tr, cornersSmall.br, cornersSmall.bl] : []
-  if(finderBoxes.length && pts.length){
+  if(finderBoxes.length && pts.length && videoWrapEl){
     const ow = videoWrapEl.clientWidth || 0
     const oh = videoWrapEl.clientHeight || 0
     if(ow && oh){
       const scaleX = ow / detSize
       const scaleY = oh / detSize
       const sz = Math.max(12, ow * 0.08)
+      let minX = ow, minY = oh, maxX = 0, maxY = 0
       for(let i = 0; i < 4; i++){
         const pt = pts[i]
         const box = finderBoxes[i]
+        const px = pt.x * scaleX
+        const py = pt.y * scaleY
+        if(minX > px) minX = px
+        if(minY > py) minY = py
+        if(maxX < px) maxX = px
+        if(maxY < py) maxY = py
         if(box && pt){
-          const x = pt.x * scaleX - sz/2
-          const y = pt.y * scaleY - sz/2
-          box.style.left = x + "px"
-          box.style.top = y + "px"
+          box.style.left = (px - sz/2) + "px"
+          box.style.top = (py - sz/2) + "px"
           box.style.width = sz + "px"
           box.style.height = sz + "px"
           box.style.display = "block"
         }
+      }
+      if(particleCloudBoxEl){
+        particleCloudBoxEl.style.left = minX + "px"
+        particleCloudBoxEl.style.top = minY + "px"
+        particleCloudBoxEl.style.width = (maxX - minX) + "px"
+        particleCloudBoxEl.style.height = (maxY - minY) + "px"
+        particleCloudBoxEl.style.display = "block"
       }
     }
   } else {
@@ -1086,6 +1110,7 @@ function decodeLoop(){
     if(finderTR) finderTR.style.display = "none"
     if(finderBR) finderBR.style.display = "none"
     if(finderBL) finderBL.style.display = "none"
+    if(particleCloudBoxEl) particleCloudBoxEl.style.display = "none"
   }
 
   // medium sampling canvas for payload extraction
@@ -1136,8 +1161,8 @@ function decodeLoop(){
       const name = rxFountain.meta ? rxFountain.meta.name : "file"
       setStatus("Receiving \"" + name + "\": " + prog.have + "/" + prog.need + " chunks (" + pct + "%).")
     }else{
-      setStatus("Locked signal. " + decodeFramesReceived + " frames received. Waiting for file info…")
-      if(decodeProgressText) decodeProgressText.textContent = decodeFramesReceived + " frames received. Keep camera steady on the screen…"
+      setStatus(decodeFramesReceived === 0 ? "Aim at the particle cloud. Frames decoded: 0" : "Locked signal. Frames decoded: " + decodeFramesReceived + ". Waiting for file info…")
+      if(decodeProgressText) decodeProgressText.textContent = "Frames decoded: " + decodeFramesReceived + (decodeFramesReceived === 0 ? " (no data yet – check alignment)" : "")
       if(decodeProgressBar) decodeProgressBar.style.width = Math.min(20, decodeFramesReceived * 2) + "%"
     }
     if(rxFountain.isComplete()){
