@@ -196,7 +196,21 @@ let decodeRateSamples = []  // { t, have } for ETA
 let decodeFramesReceived = 0  // count decoded frames (so user sees activity before meta)
 
 const GRID = 80 // reduced for easier decoding; fewer, larger cells
-const FRAME_BITS = GRID * GRID
+const CARRIER_RADIUS_SQ = 0.70
+const CARRIER_MASK = (() => {
+  const m = new Uint8Array(GRID * GRID)
+  let idx = 0
+  for(let gy=0; gy<GRID; gy++){
+    for(let gx=0; gx<GRID; gx++){
+      const nx = (gx / (GRID - 1)) * 2 - 1
+      const ny = (gy / (GRID - 1)) * 2 - 1
+      const rr = nx*nx + ny*ny
+      m[idx++] = rr <= CARRIER_RADIUS_SQ ? 1 : 0
+    }
+  }
+  return m
+})()
+const FRAME_BITS = CARRIER_MASK.reduce((a, b) => a + b, 0)
 const SYNC = "1100110011110000101010101100110011001100111100001010101011001100" // 64-bit sync marker
 const MAGIC = "VTX2" // 4 bytes (32 bits)
 const FILE_ID = (crypto && crypto.getRandomValues) ? crypto.getRandomValues(new Uint32Array(1))[0] >>> 0 : ((Math.random()*2**32)>>>0)
@@ -695,8 +709,8 @@ function detectMarkers(img, w, h){
   const yel  = bestInRegion(0,  mx, my, h,  (r,g,b)=> (r+g) - b)
   const grn  = bestInRegion(mx, w,  my, h,  (r,g,b)=> g - (r*0.5 + b*0.5))
 
-  // Confidence gates prevent random noise from being interpreted as markers.
-  if(cyan.s < 120 || mag.s < 120 || yel.s < 120 || grn.s < 70) return null
+  // Keep gates permissive so we lock quickly on real finder colors under varied exposure.
+  if(cyan.s < 35 || mag.s < 35 || yel.s < 35 || grn.s < 20) return null
   return { tl: cyan, tr: mag, bl: yel, br: grn }
 }
 
@@ -759,6 +773,8 @@ function decodePacketFromFrame(img, w, h, corners){
   let idx=0
   for(let y=0;y<GRID;y++){
     for(let x=0;x<GRID;x++){
+      const gridIdx = y*GRID + x
+      if(!CARRIER_MASK[gridIdx]) continue
       const u=(x+0.5)/GRID, v=(y+0.5)/GRID
       const p=mapPoint(inv,u,v)
       const px=Math.max(0,Math.min(w-1,Math.floor(p.x)))
@@ -883,7 +899,7 @@ function initParticles(){
   const cellW = w / GRID
   const cellH = h / GRID
 
-  const radiusSq = 0.70  // kept inside sphere; 0.78 left visible flickering arc at top
+  const radiusSq = CARRIER_RADIUS_SQ  // keep tx carrier and decoder mask identical
   for(let gy=0; gy<GRID; gy++){
     for(let gx=0; gx<GRID; gx++){
       const nx = (gx / (GRID - 1)) * 2 - 1
@@ -916,7 +932,7 @@ function drawFinders(){
   const cellW = w / GRID, cellH = h / GRID;
   const centerX = pad + (GRID - 1) * 0.5 * cellW;
   const centerY = pad + (GRID - 1) * 0.5 * cellH;
-  const radiusPx = Math.sqrt(0.70) * (GRID - 1) * 0.5 * cellW;
+  const radiusPx = Math.sqrt(CARRIER_RADIUS_SQ) * (GRID - 1) * 0.5 * cellW;
   const extraGap = 10; // push finders slightly farther from particle circle
   const inset = Math.round(centerX - radiusPx - M * 0.5 - extraGap);
   const x1 = inset, x2 = canvas.width - inset - M, y1 = inset, y2 = canvas.height - inset - M;
@@ -962,10 +978,11 @@ function startTxLoop(){
     // Stable screen-space carrier microdots (decodable layer).
     // Use bright, steady dots (no shimmer) for maximum visibility.
     ctx.globalCompositeOperation = "lighter"
+    let bitIdx = 0
     for(let i=0;i<particles.length;i++){
       const p = particles[i]
       if(!p.inside) continue
-      const bit = frame[i] === "1"
+      const bit = frame[bitIdx++] === "1"
       // We draw ONLY “on” dots; “off” is absence.
       if(!bit) continue
 
@@ -1135,7 +1152,7 @@ function decodeLoop(){
   // Keep scanning until all 4 finder markers are detected.
   if(!cornersSmall){
     setStatus("Scanning for markers… align all 4 corner squares in view.")
-    if(decodeProgressText) decodeProgressText.textContent = "Frames decoded: " + decodeFramesReceived
+    if(decodeProgressText) decodeProgressText.textContent = "Frames decoded: " + decodeFramesReceived + " / ?"
     if(video.requestVideoFrameCallback){
       video.requestVideoFrameCallback(()=>decodeLoop())
     }else{
@@ -1188,12 +1205,15 @@ function decodeLoop(){
           }
         }
       }
-      if(decodeProgressText) decodeProgressText.textContent = timeRemain || (prog.need - prog.have) + " chunks left"
+      if(decodeProgressText){
+        const counter = "Frames decoded: " + decodeFramesReceived + " / " + prog.need
+        decodeProgressText.textContent = timeRemain ? (counter + " (" + timeRemain + ")") : counter
+      }
       const name = rxFountain.meta ? rxFountain.meta.name : "file"
       setStatus("Receiving \"" + name + "\": " + prog.have + "/" + prog.need + " chunks (" + pct + "%).")
     }else{
-      setStatus(decodeFramesReceived === 0 ? "Aim at the particle cloud. Frames decoded: 0" : "Locked signal. Frames decoded: " + decodeFramesReceived + ". Waiting for file info…")
-      if(decodeProgressText) decodeProgressText.textContent = "Frames decoded: " + decodeFramesReceived + (decodeFramesReceived === 0 ? " (no data yet – check alignment)" : "")
+      setStatus(decodeFramesReceived === 0 ? "Aim at the particle cloud. Frames decoded: 0 / ?" : "Locked signal. Frames decoded: " + decodeFramesReceived + " / ?. Waiting for file info…")
+      if(decodeProgressText) decodeProgressText.textContent = "Frames decoded: " + decodeFramesReceived + " / ?" + (decodeFramesReceived === 0 ? " (no data yet – check alignment)" : "")
       if(decodeProgressBar) decodeProgressBar.style.width = Math.min(20, decodeFramesReceived * 2) + "%"
     }
     if(rxFountain.isComplete()){
