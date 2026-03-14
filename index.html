@@ -85,24 +85,27 @@ position:relative;
 width:min(90vw,480px);
 height:min(90vw,480px); /* square box for camera */
 margin:20px auto 0;
+min-height:200px;
+border:1px solid rgba(255,255,255,0.25);
+border-radius:10px;
+overflow:hidden;
 }
 
 #videoWrap > video{
-width:100%;
-height:100%;
-display:block;
-border-radius:10px;
-object-fit:contain;
-}
-
-#videoOverlay{
 position:absolute;
 left:0;
 top:0;
 width:100%;
 height:100%;
-pointer-events:none;
+display:block;
+border-radius:10px;
+object-fit:cover;
+object-position:center;
+z-index:0;
 }
+
+#finderOverlay{ position:absolute; left:0; top:0; width:100%; height:100%; pointer-events:none; z-index:1; }
+.finder-box{ position:absolute; border:2px solid rgba(0,255,0,0.9); box-sizing:border-box; display:none; }
 
 #download{
 display:none;
@@ -143,7 +146,12 @@ font-size:18px;
 
 <div id="videoWrap">
   <video id="video" autoplay playsinline style="display:none"></video>
-  <canvas id="videoOverlay"></canvas>
+  <div id="finderOverlay">
+    <div class="finder-box" id="finderTL"></div>
+    <div class="finder-box" id="finderTR"></div>
+    <div class="finder-box" id="finderBR"></div>
+    <div class="finder-box" id="finderBL"></div>
+  </div>
 </div>
 <div id="decodeProgressWrap" style="display:none; margin-top:8px; max-width:360px; margin-left:auto; margin-right:auto;">
   <div id="decodeProgressBarBg" style="height:10px; background:rgba(255,255,255,0.12); border-radius:6px; overflow:hidden;">
@@ -166,8 +174,11 @@ const gl = bgCanvas.getContext("webgl2", { antialias:false, alpha:false, premult
 let galaxy = null
 
 const video = document.getElementById("video")
-const videoOverlay = document.getElementById("videoOverlay")
-const videoOverlayCtx = videoOverlay ? videoOverlay.getContext("2d") : null
+const videoWrapEl = document.getElementById("videoWrap")
+const finderTL = document.getElementById("finderTL")
+const finderTR = document.getElementById("finderTR")
+const finderBR = document.getElementById("finderBR")
+const finderBL = document.getElementById("finderBL")
 const statusEl = document.getElementById("status")
 const fileInputEl = document.getElementById("fileInput")
 const chooseFileWrap = document.getElementById("chooseFileWrap")
@@ -1046,28 +1057,35 @@ function decodeLoop(){
   const imgSmall = sctx.getImageData(0,0, detSize, detSize)
   const cornersSmall = detectMarkers(imgSmall.data, detSize, detSize)
 
-  // Visualize detected finder corners on top of the camera view
-  if(videoOverlay && videoOverlayCtx && cornersSmall){
-    const ow = videoOverlay.clientWidth || videoOverlay.width || 0
-    const oh = videoOverlay.clientHeight || videoOverlay.height || 0
+  // Visualize detected finder corners as small divs (no canvas over video so feed stays visible)
+  const finderBoxes = cornersSmall && videoWrapEl ? [finderTL, finderTR, finderBR, finderBL] : []
+  const pts = cornersSmall ? [cornersSmall.tl, cornersSmall.tr, cornersSmall.br, cornersSmall.bl] : []
+  if(finderBoxes.length && pts.length){
+    const ow = videoWrapEl.clientWidth || 0
+    const oh = videoWrapEl.clientHeight || 0
     if(ow && oh){
-      if(videoOverlay.width !== ow) videoOverlay.width = ow
-      if(videoOverlay.height !== oh) videoOverlay.height = oh
-      const ctxO = videoOverlayCtx
-      ctxO.clearRect(0,0,ow,oh)
-      const drawBox = (pt, color) => {
-        const x = pt.x / detSize * ow
-        const y = pt.y / detSize * oh
-        const sz = Math.max(12, ow * 0.08)
-        ctxO.strokeStyle = color
-        ctxO.lineWidth = 2
-        ctxO.strokeRect(x - sz/2, y - sz/2, sz, sz)
+      const scaleX = ow / detSize
+      const scaleY = oh / detSize
+      const sz = Math.max(12, ow * 0.08)
+      for(let i = 0; i < 4; i++){
+        const pt = pts[i]
+        const box = finderBoxes[i]
+        if(box && pt){
+          const x = pt.x * scaleX - sz/2
+          const y = pt.y * scaleY - sz/2
+          box.style.left = x + "px"
+          box.style.top = y + "px"
+          box.style.width = sz + "px"
+          box.style.height = sz + "px"
+          box.style.display = "block"
+        }
       }
-      drawBox(cornersSmall.tl, "rgba(0,255,0,0.9)")
-      drawBox(cornersSmall.tr, "rgba(0,255,0,0.9)")
-      drawBox(cornersSmall.br, "rgba(0,255,0,0.9)")
-      drawBox(cornersSmall.bl, "rgba(0,255,0,0.9)")
     }
+  } else {
+    if(finderTL) finderTL.style.display = "none"
+    if(finderTR) finderTR.style.display = "none"
+    if(finderBR) finderBR.style.display = "none"
+    if(finderBL) finderBL.style.display = "none"
   }
 
   // medium sampling canvas for payload extraction
