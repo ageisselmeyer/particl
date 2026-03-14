@@ -121,7 +121,7 @@ font-size:18px;
 
 <body>
 
-<h2>PartiCl v2.03</h2>
+<h2>PartiCl v2.04</h2>
 
 <input type="file" id="fileInput" style="display:none">
 
@@ -196,6 +196,7 @@ const decodeProgressText = document.getElementById("decodeProgressText")
 const decodeDebugEl = document.getElementById("decodeDebug")
 let decodeRateSamples = []  // { t, have } for ETA
 let decodeFramesReceived = 0  // count decoded frames (so user sees activity before meta)
+let decodeExpectedTotal = null // best-known total chunk count (K)
 
 const GRID = 80 // reduced for easier decoding; fewer, larger cells
 const CARRIER_RADIUS_SQ = 0.70
@@ -1239,6 +1240,7 @@ if(decodeDebugEl) decodeDebugEl.style.display = "block"
 rxFountain = new FountainRx()
 decodeRateSamples = []
 decodeFramesReceived = 0
+decodeExpectedTotal = null
 decodeLoop._frameNo = 0
 if(decodeProgressWrap) decodeProgressWrap.style.display = "block"
 if(decodeProgressBar) decodeProgressBar.style.width = "0%"
@@ -1276,6 +1278,7 @@ const rxState = {
 
 function decodeLoop(){
   const dbg = { frameNo: (decodeLoop._frameNo = (decodeLoop._frameNo || 0) + 1) }
+  const totalLabel = () => (decodeExpectedTotal != null ? String(decodeExpectedTotal) : "?")
   const vw = video.videoWidth || 0
   const vh = video.videoHeight || 0
   if(!vw || !vh){
@@ -1349,7 +1352,7 @@ function decodeLoop(){
   // Keep scanning until all 4 finder markers are detected.
   if(!cornersSmall){
     setStatus("Scanning for markers… align all 4 corner squares in view.")
-    if(decodeProgressText) decodeProgressText.textContent = "Frames decoded: " + decodeFramesReceived + " / ?"
+    if(decodeProgressText) decodeProgressText.textContent = "Frames decoded: " + decodeFramesReceived + " / " + totalLabel()
     renderDecodeDebug(dbg)
     if(video.requestVideoFrameCallback){
       video.requestVideoFrameCallback(()=>decodeLoop())
@@ -1388,6 +1391,15 @@ function decodeLoop(){
       }else{
         parseInfo.ok = true
         parseInfo.reason = `magic=${magic} kind=${pkt[4]} len=${pkt.length}`
+        // Extract K (total chunks) as early as possible for a stable "x / total" counter.
+        const kind = pkt[4]
+        if(kind === 1 && pkt.length >= 19){
+          const kMeta = bytesToU32LE(pkt, 15)
+          if(kMeta > 0) decodeExpectedTotal = kMeta
+        }else if(kind === 2 && pkt.length >= 18){
+          const kData = bytesToU32LE(pkt, 14)
+          if(kData > 0) decodeExpectedTotal = kData
+        }
       }
     }
   }
@@ -1397,6 +1409,7 @@ function decodeLoop(){
     const before = rxFountain.progress()
     rxFountain.ingestPacket(pkt)
     const prog = rxFountain.progress()
+    if(prog.need > 0) decodeExpectedTotal = prog.need
     dbg.ingest = `progress ${before.have}/${before.need} -> ${prog.have}/${prog.need}`
     if(prog.need > 0){
       const pct = Math.min(100, Math.floor((prog.have / prog.need) * 100))
@@ -1421,14 +1434,14 @@ function decodeLoop(){
         }
       }
       if(decodeProgressText){
-        const counter = "Frames decoded: " + decodeFramesReceived + " / " + prog.need
+        const counter = "Frames decoded: " + decodeFramesReceived + " / " + totalLabel()
         decodeProgressText.textContent = timeRemain ? (counter + " (" + timeRemain + ")") : counter
       }
       const name = rxFountain.meta ? rxFountain.meta.name : "file"
       setStatus("Receiving \"" + name + "\": " + prog.have + "/" + prog.need + " chunks (" + pct + "%).")
     }else{
-      setStatus(decodeFramesReceived === 0 ? "Aim at the particle cloud. Frames decoded: 0 / ?" : "Locked signal. Frames decoded: " + decodeFramesReceived + " / ?. Waiting for file info…")
-      if(decodeProgressText) decodeProgressText.textContent = "Frames decoded: " + decodeFramesReceived + " / ?" + (decodeFramesReceived === 0 ? " (no data yet – check alignment)" : "")
+      setStatus(decodeFramesReceived === 0 ? "Aim at the particle cloud. Frames decoded: 0 / " + totalLabel() : "Locked signal. Frames decoded: " + decodeFramesReceived + " / " + totalLabel() + ". Waiting for file info…")
+      if(decodeProgressText) decodeProgressText.textContent = "Frames decoded: " + decodeFramesReceived + " / " + totalLabel() + (decodeFramesReceived === 0 ? " (no data yet – check alignment)" : "")
       if(decodeProgressBar) decodeProgressBar.style.width = Math.min(20, decodeFramesReceived * 2) + "%"
     }
     if(rxFountain.isComplete()){
@@ -1442,6 +1455,9 @@ function decodeLoop(){
       if(decodeProgressBar) decodeProgressBar.style.width = "100%"
       if(decodeProgressText) decodeProgressText.textContent = "Done"
       setStatus(`Recovered “${link.download}” (${bytes.length} bytes). You can download it now.`)
+      if(window.confirm(`Transfer complete. Download "${link.download}" now?`)){
+        link.click()
+      }
       renderDecodeDebug(dbg)
       return
     }
