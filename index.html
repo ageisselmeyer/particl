@@ -168,7 +168,7 @@ flex-wrap:wrap;
 
 <body>
 
-<h2>PartiCl v2.23</h2>
+<h2>PartiCl v2.15</h2>
 
 <input type="file" id="fileInput" style="display:none">
 
@@ -355,17 +355,13 @@ function renderDecodeDebug(dbg){
   if(dbg.packet){
     lines.push(`3) homography+sample: ${dbg.packet.ok ? "OK" : "FAIL"} (${dbg.packet.reason})`)
     lines.push(`   lum min/max/thr: ${fmt2(dbg.packet.minL)}/${fmt2(dbg.packet.maxL)}/${fmt2(dbg.packet.thr)}`)
-    lines.push(`   best pose: inset=${dbg.packet.inset || 0} scale=${dbg.packet.scale || 1} order=${dbg.packet.order} mode=${dbg.packet.sampleMode || "?"} shift=${dbg.packet.bitShift || 0} off=${dbg.packet.byteOffset || 0}`)
-    lines.push(`   poses eval/strong: ${dbg.packet.posesEval || 0}/${dbg.packet.posesStrong || 0} | top=${dbg.packet.topSync} second=${dbg.packet.secondSync}`)
-    lines.push(`   align tries: ${dbg.packet.alignTries || 0}`)
+    lines.push(`   best pose: inset=${dbg.packet.inset || 0} order=${dbg.packet.order} mode=${dbg.packet.sampleMode || "?"}`)
     lines.push(`4) sync: raw=${dbg.packet.syncMatch}/64 inv=${dbg.packet.syncMatchInv}/64 used=${dbg.packet.syncUsed}`)
     lines.push(`5) packet bytes: ${dbg.packet.byteLen}`)
   } else {
     lines.push("3) homography+sample: not reached")
     lines.push("   lum min/max/thr: n/a/n/a/n/a")
     lines.push("   best pose: inset=- order=-")
-    lines.push("   poses eval/strong: 0/0 | top=- second=-")
-    lines.push("   align tries: 0")
     lines.push("4) sync: raw=-/64 inv=-/64 used=none")
     lines.push("5) packet bytes: 0")
   }
@@ -410,11 +406,21 @@ void main(){
   float rndA = fract(sin(dot(ndc0, vec2(127.1, 311.7))) * 43758.5453123);
   float rndB = fract(sin(dot(ndc0, vec2(269.5, 183.3))) * 43758.5453123);
   float radial = clamp(length(ndc0), 0.0, 1.0);
-  // Keep carrier positions close to a linear grid mapping for decoder robustness.
-  // 3D look comes from depth/size/color, not large XY warping.
-  float depthSeed = (rndA * 2.0 - 1.0) * (0.18 + 0.14 * z);
-  float zWave = 0.02 * sin(uTime * 0.40 + radial * 4.2 + rndB * 6.283);
-  vec2 cloudXY = ndc0 * 0.52;
+  float theta = atan(ndc0.y, ndc0.x);
+  float w = uTime * 0.42 + radial * 2.0 + rndA * 6.283;
+  float swirl = theta + 0.46 * sin(w) + 0.12 * sin(uTime * 0.9 + rndB * 6.283);
+  float baseR = radial * (0.66 + 0.12 * rndB);
+  float flowR = max(0.015, baseR + 0.05 * sin(w + rndA * 4.0));
+  vec2 flow = vec2(cos(swirl), sin(swirl)) * flowR;
+  vec2 tangent = vec2(-ndc0.y, ndc0.x);
+  vec2 advect = 0.12 * tangent * sin(w * 0.9 + rndB * 6.283) + 0.08 * ndc0 * cos(w * 0.7 + rndA * 6.283);
+  vec2 drift = 0.04 * vec2(
+    cos(w * 0.8 + rndA * 3.0),
+    sin(w * 0.7 + rndB * 4.0)
+  ) * (0.35 + 0.65 * (1.0 - radial));
+  float depthSeed = (rndA * 2.0 - 1.0) * (0.20 + 0.20 * z);
+  float zWave = 0.10 * sin(uTime * 0.75 + radial * 4.2 + rndB * 6.283);
+  vec2 cloudXY = ndc0 * 0.38 + flow * 0.25 + advect * 0.8 + drift * 0.8;
   vec3 p = vec3(cloudXY, depthSeed + zWave);
   float cam = 2.75;
   float persp = cam / (cam - p.z);
@@ -425,7 +431,7 @@ void main(){
   float depth01 = clamp((p.z + 1.3) / 2.6, 0.0, 1.0);
   float pulse = 0.985 + 0.03 * sin(uTime * 0.95 + z * 8.0 + rndB * 6.283);
   float vis = on;
-  gl_PointSize = mix(4.6, 11.8, depth01) * pulse * vis;
+  gl_PointSize = mix(5.8, 15.8, depth01) * pulse * vis;
   vec3 deepBlue = vec3(0.02, 0.16, 0.74);
   vec3 lightBlue = vec3(0.11, 0.48, 0.98);
   vec3 onCol = mix(deepBlue, lightBlue, 0.22 + 0.78*depth01) * (0.94 + 0.52*depth01);
@@ -471,9 +477,21 @@ void main(){
   float rndA = fract(sin(dot(ndc0, vec2(127.1, 311.7))) * 43758.5453123);
   float rndB = fract(sin(dot(ndc0, vec2(269.5, 183.3))) * 43758.5453123);
   float radial = clamp(length(ndc0), 0.0, 1.0);
-  float depthSeed = (rndA * 2.0 - 1.0) * (0.18 + 0.14 * z);
-  float zWave = 0.02 * sin(uTime * 0.40 + radial * 4.2 + rndB * 6.283);
-  vec2 cloudXY = ndc0 * 0.52;
+  float theta = atan(ndc0.y, ndc0.x);
+  float w = uTime * 0.42 + radial * 2.0 + rndA * 6.283;
+  float swirl = theta + 0.46 * sin(w) + 0.12 * sin(uTime * 0.9 + rndB * 6.283);
+  float baseR = radial * (0.66 + 0.12 * rndB);
+  float flowR = max(0.015, baseR + 0.05 * sin(w + rndA * 4.0));
+  vec2 flow = vec2(cos(swirl), sin(swirl)) * flowR;
+  vec2 tangent = vec2(-ndc0.y, ndc0.x);
+  vec2 advect = 0.12 * tangent * sin(w * 0.9 + rndB * 6.283) + 0.08 * ndc0 * cos(w * 0.7 + rndA * 6.283);
+  vec2 drift = 0.04 * vec2(
+    cos(w * 0.8 + rndA * 3.0),
+    sin(w * 0.7 + rndB * 4.0)
+  ) * (0.35 + 0.65 * (1.0 - radial));
+  float depthSeed = (rndA * 2.0 - 1.0) * (0.20 + 0.20 * z);
+  float zWave = 0.10 * sin(uTime * 0.75 + radial * 4.2 + rndB * 6.283);
+  vec2 cloudXY = ndc0 * 0.38 + flow * 0.25 + advect * 0.8 + drift * 0.8;
   vec3 p = vec3(cloudXY, depthSeed + zWave);
   float cam = 2.75;
   float persp = cam / (cam - p.z);
@@ -484,7 +502,7 @@ void main(){
   float depth01 = clamp((p.z + 1.3) / 2.6, 0.0, 1.0);
   float pulse = 0.985 + 0.03 * sin(uTime * 0.95 + z * 8.0 + rndB * 6.283);
   float vis = on;
-  gl_PointSize = mix(4.6, 11.8, depth01) * pulse * vis;
+  gl_PointSize = mix(5.8, 15.8, depth01) * pulse * vis;
   vec3 deepBlue = vec3(0.02, 0.16, 0.74);
   vec3 lightBlue = vec3(0.11, 0.48, 0.98);
   vec3 onCol = mix(deepBlue, lightBlue, 0.22 + 0.78*depth01) * (0.94 + 0.52*depth01);
@@ -657,8 +675,7 @@ class FountainTx{
     // Conservative payload budget so one full droplet packet fits each frame.
     // With lower point density we intentionally reduce throughput for robustness.
     const maxPayload = Math.floor((FRAME_BITS - SYNC.length - TOTAL_CHUNKS_BITS * TOTAL_CHUNKS_REPEATS) / 8) - 30
-    // Keep payload smaller than max to increase CRC pass probability on noisy channels.
-    this.chunkSize = Math.min(128, Math.max(96, maxPayload | 0))
+    this.chunkSize = Math.min(512, Math.max(96, maxPayload | 0))
     this.K = Math.ceil(fileBytes.length / this.chunkSize)
     this.chunks = new Array(this.K)
     for(let i=0;i<this.K;i++){
@@ -683,11 +700,12 @@ class FountainTx{
 
   _degree(rng){
     const r = (rng()>>>0) / 0xFFFFFFFF
-    // Robust-first profile: favor degree-1 so each valid droplet is likely to decode a chunk.
-    if(r < 0.68) return 1
-    if(r < 0.88) return 2
-    if(r < 0.97) return 3
-    return Math.min(this.K, 4)
+    if(r < 0.25) return 1
+    if(r < 0.55) return 2
+    if(r < 0.75) return 3
+    if(r < 0.88) return 4
+    if(r < 0.95) return 6
+    return Math.min(this.K, 10)
   }
 
   _crc32(u8){
@@ -964,7 +982,7 @@ function detectMarkers(img, w, h, dbg){
   }
 
   // Keep gates permissive so we lock quickly on real finder colors under varied exposure.
-  if(cyan.s < 14 || mag.s < 14 || yel.s < 14 || grn.s < 11){
+  if(cyan.s < 18 || mag.s < 18 || yel.s < 18 || grn.s < 14){
     if(dbg && dbg.marker) dbg.marker.reason = "low-color-confidence"
     return null
   }
@@ -1050,15 +1068,7 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
       syncUsed: "none",
       byteLen: 0,
       inset: 0,
-      order: -1,
-      scale: 1,
-      bitShift: 0,
-      byteOffset: 0,
-      posesEval: 0,
-      posesStrong: 0,
-      topSync: "-",
-      secondSync: "-",
-      alignTries: 0
+      order: -1
     }
   }
   const base = [corners.tl, corners.tr, corners.br, corners.bl].map(p=>({x:p.x,y:p.y}))
@@ -1066,11 +1076,10 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
     [0,1,2,3], [1,2,3,0], [2,3,0,1], [3,0,1,2],
     [0,3,2,1], [3,2,1,0], [2,1,0,3], [1,0,3,2]
   ]
-  const insetCandidates = [0.50, 0.56, 0.62, 0.66, 0.70, 0.72, 0.74, 0.78, 0.82]
-  const scaleCandidates = [0.45, 0.55, 0.65, 0.75, 0.85, 1.0]
+  const insetCandidates = [0.62, 0.66, 0.70, 0.72, 0.74, 0.78]
   const dst = [{x:0,y:0},{x:1,y:0},{x:1,y:1},{x:0,y:1}]
 
-  function evaluatePose(orderIdx, inset, carrierScale){
+  function evaluatePose(orderIdx, inset){
     const ord = orders[orderIdx]
     const raw = [base[ord[0]], base[ord[1]], base[ord[2]], base[ord[3]]]
     const cx = (raw[0].x+raw[1].x+raw[2].x+raw[3].x)/4
@@ -1084,22 +1093,16 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
     let minMin=1e9, maxMin=-1e9
     let minBlueMax=1e9, maxBlueMax=-1e9
     let minBlueMin=1e9, maxBlueMin=-1e9
-    let minInkMax=1e9, maxInkMax=-1e9
-    let minInkMin=1e9, maxInkMin=-1e9
     const lumMax = new Float32Array(FRAME_BITS)
     const lumMin = new Float32Array(FRAME_BITS)
     const blueMax = new Float32Array(FRAME_BITS)
     const blueMin = new Float32Array(FRAME_BITS)
-    const inkMax = new Float32Array(FRAME_BITS)
-    const inkMin = new Float32Array(FRAME_BITS)
     let idx=0
     for(let y=0;y<GRID;y++){
       for(let x=0;x<GRID;x++){
         const gridIdx = y*GRID + x
         if(!CARRIER_MASK[gridIdx]) continue
-        const u0=(x+0.5)/GRID, v0=(y+0.5)/GRID
-        const u=0.5 + (u0 - 0.5) * carrierScale
-        const v=0.5 + (v0 - 0.5) * carrierScale
+        const u=(x+0.5)/GRID, v=(y+0.5)/GRID
         const p=mapPoint(inv,u,v)
         const px=Math.max(1,Math.min(w-2,Math.floor(p.x)))
         const py=Math.max(1,Math.min(h-2,Math.floor(p.y)))
@@ -1107,8 +1110,6 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
         let Lmin = 1
         let Bmax = 0
         let Bmin = 1
-        let Imax = 0
-        let Imin = 1
         for(let oy=-1; oy<=1; oy++){
           for(let ox=-1; ox<=1; ox++){
             const sx = px + ox
@@ -1118,21 +1119,16 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
             const l=(0.2126*r + 0.7152*g + 0.0722*b)/255
             // Blue-emphasis metric in [0..1]. Robust for dark-blue ON dots on white.
             const bl = 0.5 + 0.5 * ((b - 0.5 * (r + g)) / 255)
-            const ink = 1 - l
             if(l > Lmax) Lmax = l
             if(l < Lmin) Lmin = l
             if(bl > Bmax) Bmax = bl
             if(bl < Bmin) Bmin = bl
-            if(ink > Imax) Imax = ink
-            if(ink < Imin) Imin = ink
           }
         }
         lumMax[idx] = Lmax
         lumMin[idx] = Lmin
         blueMax[idx] = Bmax
         blueMin[idx] = Bmin
-        inkMax[idx] = Imax
-        inkMin[idx] = Imin
         idx++
         if(Lmax<minMax) minMax=Lmax
         if(Lmax>maxMax) maxMax=Lmax
@@ -1142,24 +1138,18 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
         if(Bmax>maxBlueMax) maxBlueMax=Bmax
         if(Bmin<minBlueMin) minBlueMin=Bmin
         if(Bmin>maxBlueMin) maxBlueMin=Bmin
-        if(Imax<minInkMax) minInkMax=Imax
-        if(Imax>maxInkMax) maxInkMax=Imax
-        if(Imin<minInkMin) minInkMin=Imin
-        if(Imin>maxInkMin) maxInkMin=Imin
       }
     }
     const spanMax = maxMax - minMax
     const spanMin = maxMin - minMin
     const spanBlueMax = maxBlueMax - minBlueMax
     const spanBlueMin = maxBlueMin - minBlueMin
-    const spanInkMax = maxInkMax - minInkMax
-    const spanInkMin = maxInkMin - minInkMin
-    if(spanMax < 0.02 && spanMin < 0.02 && spanBlueMax < 0.02 && spanBlueMin < 0.02 && spanInkMax < 0.02 && spanInkMin < 0.02){
+    if(spanMax < 0.02 && spanMin < 0.02 && spanBlueMax < 0.02 && spanBlueMin < 0.02){
       return {
         match: -1,
         reason: "low-contrast",
-        min: Math.min(minMax, minMin, minBlueMax, minBlueMin, minInkMax, minInkMin),
-        max: Math.max(maxMax, maxMin, maxBlueMax, maxBlueMin, maxInkMax, maxInkMin),
+        min: Math.min(minMax, minMin, minBlueMax, minBlueMin),
+        max: Math.max(maxMax, maxMin, maxBlueMax, maxBlueMin),
         inset,
         orderIdx
       }
@@ -1215,15 +1205,11 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
     const minPath = scoreSignal(lumMin)
     const blueMaxPath = scoreSignal(blueMax)
     const blueMinPath = scoreSignal(blueMin)
-    const inkMaxPath = scoreSignal(inkMax)
-    const inkMinPath = scoreSignal(inkMin)
     const candidates = [
       { ...maxPath, mode: "luma-max", min:minMax, max:maxMax },
       { ...minPath, mode: "luma-min", min:minMin, max:maxMin },
       { ...blueMaxPath, mode: "blue-max", min:minBlueMax, max:maxBlueMax },
-      { ...blueMinPath, mode: "blue-min", min:minBlueMin, max:maxBlueMin },
-      { ...inkMaxPath, mode: "ink-max", min:minInkMax, max:maxInkMax },
-      { ...inkMinPath, mode: "ink-min", min:minInkMin, max:maxInkMin }
+      { ...blueMinPath, mode: "blue-min", min:minBlueMin, max:maxBlueMin }
     ]
     let chosen = candidates[0]
     for(let i=1;i<candidates.length;i++){
@@ -1232,7 +1218,7 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
     const used = chosen.used
     return {
       match: used,
-      reason: used >= 40 ? "ok" : "sync-too-low",
+      reason: used >= 46 ? "ok" : "sync-too-low",
       bits: chosen.bits,
       min: chosen.min,
       max: chosen.max,
@@ -1242,20 +1228,15 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
       syncUsed: chosen.best.useInv ? "inverted" : "normal",
       sampleMode: chosen.mode,
       inset,
-      scale: carrierScale,
       orderIdx
     }
   }
 
   let bestPose = null
-  const poses = []
   for(let oi=0; oi<orders.length; oi++){
     for(const inset of insetCandidates){
-      for(const scale of scaleCandidates){
-        const pose = evaluatePose(oi, inset, scale)
-        poses.push(pose)
-        if(!bestPose || pose.match > bestPose.match) bestPose = pose
-      }
+      const pose = evaluatePose(oi, inset)
+      if(!bestPose || pose.match > bestPose.match) bestPose = pose
     }
   }
 
@@ -1272,14 +1253,13 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
     dbg.packet.syncUsed = bestPose.syncUsed || "none"
     dbg.packet.sampleMode = bestPose.sampleMode || "?"
     dbg.packet.inset = bestPose.inset
-    dbg.packet.scale = bestPose.scale != null ? bestPose.scale : 1
     dbg.packet.order = bestPose.orderIdx
   }
   const totalStart = SYNC.length
   const totalBlockLen = TOTAL_CHUNKS_BITS * TOTAL_CHUNKS_REPEATS
-  function decodeTotalFromBits(bits){
-    if(!bits || bits.length < totalStart + totalBlockLen) return 0
-    const totalRepBits = bits.slice(totalStart, totalStart + totalBlockLen)
+  let totalChunks = 0
+  if(bestPose.bits && bestPose.bits.length >= totalStart + totalBlockLen){
+    const totalRepBits = bestPose.bits.slice(totalStart, totalStart + totalBlockLen)
     let totalBits = ""
     for(let i=0;i<TOTAL_CHUNKS_BITS;i++){
       let ones = 0
@@ -1289,101 +1269,17 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
       }
       totalBits += (ones >= 2) ? "1" : "0"
     }
-    return parseInt(totalBits, 2) >>> 0
+    totalChunks = parseInt(totalBits, 2) >>> 0
   }
-  let totalChunks = decodeTotalFromBits(bestPose.bits)
-  if(bestPose.match < 40){
+  if(bestPose.match < 46){
     if(dbg && dbg.packet) dbg.packet.reason = bestPose.reason || "sync-too-low"
     return { pkt: null, totalChunks }
   }
-  function tryPacketFromShift(bits, shift){
-    const payloadBits = bits.slice(totalStart + totalBlockLen)
-    const bytes = bitsToBytes(payloadBits.slice(shift))
-    if(bytes.length < 9) return null
-    const m0 = MAGIC.charCodeAt(0), m1 = MAGIC.charCodeAt(1), m2 = MAGIC.charCodeAt(2), m3 = MAGIC.charCodeAt(3)
-    for(let start=0; start<=bytes.length-9; start++){
-      if(bytes[start] !== m0 || bytes[start+1] !== m1 || bytes[start+2] !== m2 || bytes[start+3] !== m3) continue
-      const kind = bytes[start + 4]
-      if(kind === 2){
-        let off = start + 5
-        if(bytes.length < off + 4 + 4 + 1 + 4 + 2 + 2) continue
-        off += 4 + 4 + 1 + 4 + 2
-        const payloadLen = bytesToU16LE(bytes, off); off += 2
-        const pktLen = (off - start) + payloadLen + 4
-        if(start + pktLen > bytes.length) continue
-        const pkt = bytes.slice(start, start + pktLen)
-        const crc = bytesToU32LE(pkt, pktLen - 4)
-        const calc = crc32(pkt.slice(0, pktLen - 4))
-        if(calc !== crc) continue
-        return { pkt, shift, start }
-      }
-      if(kind === 1){
-        let off = start + 5
-        if(bytes.length < off + 4 + 4 + 2 + 4 + 2 + 2) continue
-        off += 4 + 4 + 2 + 4
-        const nameLen = bytesToU16LE(bytes, off); off += 2
-        const typeLen = bytesToU16LE(bytes, off); off += 2
-        const pktLen = (off - start) + nameLen + typeLen + 4
-        if(start + pktLen > bytes.length) continue
-        const pkt = bytes.slice(start, start + pktLen)
-        const crc = bytesToU32LE(pkt, pktLen - 4)
-        const calc = crc32(pkt.slice(0, pktLen - 4))
-        if(calc !== crc) continue
-        return { pkt, shift, start }
-      }
-    }
-    return null
-  }
-  const orderedPoses = poses
-    .filter(p => p && p.bits && p.match >= 34)
-    .sort((a, b) => (b.match || -1) - (a.match || -1))
-    .slice(0, 24)
-  if(dbg && dbg.packet){
-    dbg.packet.posesEval = poses.length
-    dbg.packet.posesStrong = orderedPoses.length
-    const p0 = orderedPoses[0]
-    const p1 = orderedPoses[1]
-    dbg.packet.topSync = p0 ? `${p0.match}@${p0.sampleMode}/${p0.inset}/${p0.scale}` : "-"
-    dbg.packet.secondSync = p1 ? `${p1.match}@${p1.sampleMode}/${p1.inset}/${p1.scale}` : "-"
-  }
-  let aligned = null
-  let alignedPose = bestPose
-  let alignTries = 0
-  for(const pose of orderedPoses){
-    for(let shift=0; shift<8; shift++){
-      alignTries++
-      aligned = tryPacketFromShift(pose.bits, shift)
-      if(aligned){
-        alignedPose = pose
-        break
-      }
-    }
-    if(aligned) break
-  }
-  if(!aligned){
-    if(dbg && dbg.packet){
-      dbg.packet.ok = false
-      dbg.packet.reason = "no-valid-packet"
-      dbg.packet.byteLen = 0
-      dbg.packet.bitShift = 0
-      dbg.packet.byteOffset = 0
-      dbg.packet.alignTries = alignTries
-    }
-    return { pkt: null, totalChunks }
-  }
-  const out = aligned.pkt
-  totalChunks = decodeTotalFromBits(alignedPose.bits)
+  const out = bitsToBytes(bestPose.bits.slice(totalStart + totalBlockLen))
   if(dbg && dbg.packet){
     dbg.packet.ok = true
     dbg.packet.reason = "ok"
     dbg.packet.byteLen = out.length
-    dbg.packet.bitShift = aligned.shift
-    dbg.packet.byteOffset = aligned.start
-    dbg.packet.alignTries = alignTries
-    dbg.packet.inset = alignedPose.inset
-    dbg.packet.scale = alignedPose.scale != null ? alignedPose.scale : dbg.packet.scale
-    dbg.packet.order = alignedPose.orderIdx
-    dbg.packet.sampleMode = alignedPose.sampleMode || dbg.packet.sampleMode
   }
   return { pkt: out, totalChunks }
 }
@@ -1490,7 +1386,7 @@ ctx.fillRect(x,y,size,size)
 }
 
 function drawFinders(){
-  const M = 38;
+  const M = 32;
   const pad = 16;
   const w = canvas.width - pad*2, h = canvas.height - pad*2;
   const cellW = w / GRID, cellH = h / GRID;
@@ -1507,13 +1403,13 @@ function drawFinders(){
     ctx.arc(cx, cy, rr, 0, Math.PI * 2)
     ctx.fill()
   }
-  drawCorner(x1 + rr, y1 + rr, "rgba(0,210,230,0.96)")
-  drawCorner(x2 + rr, y1 + rr, "rgba(235,70,220,0.96)")
-  drawCorner(x1 + rr, y2 + rr, "rgba(235,220,40,0.96)")
-  drawCorner(x2 + rr, y2 + rr, "rgba(40,205,75,0.96)")
+  drawCorner(x1 + rr, y1 + rr, "rgba(0,210,230,0.82)")
+  drawCorner(x2 + rr, y1 + rr, "rgba(235,70,220,0.82)")
+  drawCorner(x1 + rr, y2 + rr, "rgba(235,220,40,0.82)")
+  drawCorner(x2 + rr, y2 + rr, "rgba(40,205,75,0.82)")
 }
 
-const TX_FRAME_MS = 700  // show each data frame longer for better camera SNR
+const TX_FRAME_MS = 500  // show each data frame for 500ms (decoding window)
 let txNextFrameAtMs = 0
 
 function startTxLoop(){
@@ -1787,16 +1683,11 @@ function decodeLoop(){
   }
 
   const frameDecoded = decodePacketFromFrame(img.data, sampSize, sampSize, corners, dbg)
-  // Use raw frame-level total only as early UI estimate when sync confidence is strong.
-  // Authoritative locking still comes from valid packet parsing below.
-  if(
-    frameDecoded &&
-    frameDecoded.totalChunks > 0 &&
-    frameDecoded.totalChunks <= MAX_TOTAL_ESTIMATE &&
-    dbg.packet &&
-    dbg.packet.syncMatch >= 50
-  ){
+  if(frameDecoded && frameDecoded.totalChunks > 0){
+    // Always keep a rolling UI estimate so total does not remain "?" while locking.
     considerEstimatedTotal(frameDecoded.totalChunks)
+    // Raw bit-level total can be noisy; keep only as low-confidence fallback.
+    considerTotalCandidate(frameDecoded.totalChunks, 8)
   }
   const pkt = frameDecoded ? frameDecoded.pkt : null
   const parseInfo = { ok: false, reason: "no-packet" }
@@ -1820,13 +1711,16 @@ function decodeLoop(){
           const kData = bytesToU32LE(pkt, off); off += 4
           const _chunkSize = bytesToU16LE(pkt, off); off += 2
           const payloadLen = bytesToU16LE(pkt, off); off += 2
+          // Early estimate from droplet header K (less noisy than raw frame bits).
+          // Requires repeated agreement before it can become authoritative.
+          considerEstimatedTotal(kData)
+          considerTotalCandidate(kData, 3)
           const pktLen = off + payloadLen + 4
           if(pktLen <= pkt.length){
             const sliced = pkt.slice(0, pktLen)
             const crc = bytesToU32LE(sliced, pktLen - 4)
             const calc = crc32(sliced.slice(0, pktLen - 4))
             if(calc === crc){
-              considerEstimatedTotal(kData)
               setTotalAuthoritative(kData)
             }else{
               parseInfo.reason += " crc-mismatch"
@@ -1844,10 +1738,10 @@ function decodeLoop(){
   }
   dbg.parse = parseInfo
   if(pkt && rxFountain){
+    decodeFramesReceived++
     const before = rxFountain.progress()
     rxFountain.ingestPacket(pkt)
     const prog = rxFountain.progress()
-    if(prog.have > before.have) decodeFramesReceived++
     if(prog.need > 0) considerTotalCandidate(prog.need, 1)
     dbg.ingest = `progress ${before.have}/${before.need} -> ${prog.have}/${prog.need}`
     if(prog.need > 0){
@@ -1873,14 +1767,14 @@ function decodeLoop(){
         }
       }
       if(decodeProgressText){
-        const counter = "Chunks decoded: " + prog.have + " / " + totalLabel()
+        const counter = "Frames decoded: " + decodeFramesReceived + " / " + totalLabel()
         decodeProgressText.textContent = timeRemain ? (counter + " (" + timeRemain + ")") : counter
       }
       const name = rxFountain.meta ? rxFountain.meta.name : "file"
       setStatus("Receiving \"" + name + "\": " + prog.have + "/" + prog.need + " chunks (" + pct + "%).")
     }else{
-      setStatus(decodeFramesReceived === 0 ? "Aim at the particle cloud. Chunks decoded: 0 / " + totalLabel() : "Locked signal. Chunks decoded: " + decodeFramesReceived + " / " + totalLabel() + ". Waiting for valid packets…")
-      if(decodeProgressText) decodeProgressText.textContent = "Chunks decoded: " + decodeFramesReceived + " / " + totalLabel() + (decodeFramesReceived === 0 ? " (no data yet – check alignment)" : "")
+      setStatus(decodeFramesReceived === 0 ? "Aim at the particle cloud. Frames decoded: 0 / " + totalLabel() : "Locked signal. Frames decoded: " + decodeFramesReceived + " / " + totalLabel() + ". Waiting for valid packets…")
+      if(decodeProgressText) decodeProgressText.textContent = "Frames decoded: " + decodeFramesReceived + " / " + totalLabel() + (decodeFramesReceived === 0 ? " (no data yet – check alignment)" : "")
       if(decodeProgressBar) decodeProgressBar.style.width = Math.min(20, decodeFramesReceived * 2) + "%"
     }
     if(rxFountain.isComplete()){
