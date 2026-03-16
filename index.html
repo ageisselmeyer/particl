@@ -61,8 +61,8 @@ margin-top:20px;
 
 #canvasWrap{
 position:relative;
-width:560px;
-height:560px;
+width:620px;
+height:620px;
 margin:20px auto 0;
 overflow:hidden;
 background:#ffffff;
@@ -73,8 +73,8 @@ border-radius:16px;
 position:absolute;
 left:0;
 top:0;
-width:560px;
-height:560px;
+width:620px;
+height:620px;
 margin-top:0;
 }
 
@@ -124,7 +124,7 @@ font-size:18px;
 
 <body>
 
-<h2>PartiCl v2.06</h2>
+<h2>PartiCl v2.07</h2>
 
 <input type="file" id="fileInput" style="display:none">
 
@@ -142,8 +142,8 @@ font-size:18px;
 <br>
 
 <div id="canvasWrap">
-  <canvas id="bg" width="560" height="560"></canvas>
-  <canvas id="tx" width="560" height="560"></canvas>
+  <canvas id="bg" width="620" height="620"></canvas>
+  <canvas id="tx" width="620" height="620"></canvas>
 </div>
 
 <br>
@@ -1032,23 +1032,26 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
     dbg.packet.inset = bestPose.inset
     dbg.packet.order = bestPose.orderIdx
   }
-  if(bestPose.match < 46){
-    if(dbg && dbg.packet) dbg.packet.reason = bestPose.reason || "sync-too-low"
-    return null
-  }
   const totalStart = SYNC.length
   const totalBlockLen = TOTAL_CHUNKS_BITS * TOTAL_CHUNKS_REPEATS
-  const totalRepBits = bestPose.bits.slice(totalStart, totalStart + totalBlockLen)
-  let totalBits = ""
-  for(let i=0;i<TOTAL_CHUNKS_BITS;i++){
-    let ones = 0
-    for(let r=0;r<TOTAL_CHUNKS_REPEATS;r++){
-      const b = totalRepBits[i + r*TOTAL_CHUNKS_BITS]
-      if(b === "1") ones++
+  let totalChunks = 0
+  if(bestPose.bits && bestPose.bits.length >= totalStart + totalBlockLen){
+    const totalRepBits = bestPose.bits.slice(totalStart, totalStart + totalBlockLen)
+    let totalBits = ""
+    for(let i=0;i<TOTAL_CHUNKS_BITS;i++){
+      let ones = 0
+      for(let r=0;r<TOTAL_CHUNKS_REPEATS;r++){
+        const b = totalRepBits[i + r*TOTAL_CHUNKS_BITS]
+        if(b === "1") ones++
+      }
+      totalBits += (ones >= 2) ? "1" : "0"
     }
-    totalBits += (ones >= 2) ? "1" : "0"
+    totalChunks = parseInt(totalBits, 2) >>> 0
   }
-  const totalChunks = parseInt(totalBits, 2) >>> 0
+  if(bestPose.match < 46){
+    if(dbg && dbg.packet) dbg.packet.reason = bestPose.reason || "sync-too-low"
+    return { pkt: null, totalChunks }
+  }
   const out = bitsToBytes(bestPose.bits.slice(totalStart + totalBlockLen))
   if(dbg && dbg.packet){
     dbg.packet.ok = true
@@ -1241,6 +1244,33 @@ function startTxLoop(){
   requestAnimationFrame(loop)
 }
 
+async function tuneDecoderCameraExposure(stream){
+  try{
+    const track = stream?.getVideoTracks?.()[0]
+    if(!track || !track.getCapabilities || !track.applyConstraints) return
+    const caps = track.getCapabilities()
+    const adv = {}
+    if(caps.exposureMode){
+      const modes = Array.isArray(caps.exposureMode) ? caps.exposureMode : [caps.exposureMode]
+      if(modes.includes("continuous")) adv.exposureMode = "continuous"
+      else if(modes.includes("manual")) adv.exposureMode = "manual"
+    }
+    if(typeof caps.exposureCompensation?.min === "number" && typeof caps.exposureCompensation?.max === "number"){
+      const target = Math.min(caps.exposureCompensation.max, Math.max(caps.exposureCompensation.min, 1.25))
+      adv.exposureCompensation = target
+    }
+    if(typeof caps.brightness?.min === "number" && typeof caps.brightness?.max === "number"){
+      const target = Math.min(caps.brightness.max, Math.max(caps.brightness.min, 0.7))
+      adv.brightness = target
+    }
+    if(Object.keys(adv).length){
+      await track.applyConstraints({ advanced: [adv] })
+    }
+  }catch(_){
+    // Best-effort only; unsupported on many mobile browsers.
+  }
+}
+
 async function startDecoder(){
 
 hideModeButtons()
@@ -1276,6 +1306,7 @@ try {
   }
 }
 if(!stream) { setStatus("Could not access camera."); return }
+await tuneDecoderCameraExposure(stream)
 
 video.srcObject = stream
 if(videoWrapEl) videoWrapEl.style.display = "block"
