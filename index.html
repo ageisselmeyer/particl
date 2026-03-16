@@ -168,7 +168,7 @@ flex-wrap:wrap;
 
 <body>
 
-<h2>PartiCl v2.18</h2>
+<h2>PartiCl v2.19</h2>
 
 <input type="file" id="fileInput" style="display:none">
 
@@ -247,6 +247,9 @@ const decodeTotalVotes = new Map()
 let decodeEstimatedTotal = null
 let decodeRecentTotals = []
 const MAX_TOTAL_ESTIMATE = 8192
+let decodeLastCornersSmall = null
+let decodeMarkerMissCount = 0
+const DECODE_MARKER_GRACE_FRAMES = 8
 
 const GRID = 56 // lower density (~half points): larger cells, more robust decode
 const CARRIER_RADIUS_SQ = 0.70
@@ -1595,6 +1598,8 @@ decodeExpectedTotal = null
 decodeTotalVotes.clear()
 decodeEstimatedTotal = null
 decodeRecentTotals = []
+decodeLastCornersSmall = null
+decodeMarkerMissCount = 0
 decodeLoop._frameNo = 0
 if(decodeProgressWrap) decodeProgressWrap.style.display = "block"
 if(decodeProgressBar) decodeProgressBar.style.width = "0%"
@@ -1665,6 +1670,18 @@ function decodeLoop(){
   sctx.drawImage(video, sx, sy, side, side, 0,0, detSize, detSize)
   const imgSmall = sctx.getImageData(0,0, detSize, detSize)
   const cornersSmall = detectMarkers(imgSmall.data, detSize, detSize, dbg)
+  let cornersForDecode = cornersSmall
+  if(cornersSmall){
+    decodeLastCornersSmall = cornersSmall
+    decodeMarkerMissCount = 0
+  }else if(decodeLastCornersSmall && decodeMarkerMissCount < DECODE_MARKER_GRACE_FRAMES){
+    decodeMarkerMissCount++
+    cornersForDecode = decodeLastCornersSmall
+    if(dbg.marker){
+      dbg.marker.ok = true
+      dbg.marker.reason = `grace(${decodeMarkerMissCount})`
+    }
+  }
 
   // Visualize detected finder corners and particle cloud region (no canvas over video so feed stays visible)
   const finderBoxes = cornersSmall && videoWrapEl ? [finderTL, finderTR, finderBR, finderBL] : []
@@ -1710,8 +1727,8 @@ function decodeLoop(){
     if(particleCloudBoxEl) particleCloudBoxEl.style.display = "none"
   }
 
-  // Keep scanning until all 4 finder markers are detected.
-  if(!cornersSmall){
+  // Keep scanning until all 4 finder markers are detected (with short grace).
+  if(!cornersForDecode){
     setStatus("Scanning for markers… align all 4 corner squares in view.")
     if(decodeProgressText) decodeProgressText.textContent = "Frames decoded: " + decodeFramesReceived + " / " + totalLabel()
     renderDecodeDebug(dbg)
@@ -1734,10 +1751,10 @@ function decodeLoop(){
 
   const scale = sampSize / detSize
   const corners = {
-    tl: {x: cornersSmall.tl.x*scale, y: cornersSmall.tl.y*scale},
-    tr: {x: cornersSmall.tr.x*scale, y: cornersSmall.tr.y*scale},
-    br: {x: cornersSmall.br.x*scale, y: cornersSmall.br.y*scale},
-    bl: {x: cornersSmall.bl.x*scale, y: cornersSmall.bl.y*scale},
+    tl: {x: cornersForDecode.tl.x*scale, y: cornersForDecode.tl.y*scale},
+    tr: {x: cornersForDecode.tr.x*scale, y: cornersForDecode.tr.y*scale},
+    br: {x: cornersForDecode.br.x*scale, y: cornersForDecode.br.y*scale},
+    bl: {x: cornersForDecode.bl.x*scale, y: cornersForDecode.bl.y*scale},
   }
 
   const frameDecoded = decodePacketFromFrame(img.data, sampSize, sampSize, corners, dbg)
@@ -1807,6 +1824,12 @@ function decodeLoop(){
     }
   }
   dbg.parse = parseInfo
+  if(!pkt){
+    setStatus("Locked markers. Waiting for decodable packets…")
+    if(decodeProgressText){
+      decodeProgressText.textContent = "Frames decoded: " + decodeFramesReceived + " / " + totalLabel()
+    }
+  }
   if(pkt && rxFountain && parseInfo.ok){
     decodeFramesReceived++
     const before = rxFountain.progress()
