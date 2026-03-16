@@ -168,7 +168,7 @@ flex-wrap:wrap;
 
 <body>
 
-<h2>PartiCl v2.19</h2>
+<h2>PartiCl v2.20</h2>
 
 <input type="file" id="fileInput" style="display:none">
 
@@ -1349,13 +1349,23 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
     aligned = tryPacketFromShift(shift)
     if(aligned) break
   }
-  const out = aligned ? aligned.pkt : bitsToBytes(payloadBits)
+  if(!aligned){
+    if(dbg && dbg.packet){
+      dbg.packet.ok = false
+      dbg.packet.reason = "no-valid-packet"
+      dbg.packet.byteLen = 0
+      dbg.packet.bitShift = 0
+      dbg.packet.byteOffset = 0
+    }
+    return { pkt: null, totalChunks }
+  }
+  const out = aligned.pkt
   if(dbg && dbg.packet){
     dbg.packet.ok = true
     dbg.packet.reason = "ok"
     dbg.packet.byteLen = out.length
-    dbg.packet.bitShift = aligned ? aligned.shift : 0
-    dbg.packet.byteOffset = aligned ? aligned.start : 0
+    dbg.packet.bitShift = aligned.shift
+    dbg.packet.byteOffset = aligned.start
   }
   return { pkt: out, totalChunks }
 }
@@ -1485,7 +1495,7 @@ function drawFinders(){
   drawCorner(x2 + rr, y2 + rr, "rgba(40,205,75,0.96)")
 }
 
-const TX_FRAME_MS = 500  // show each data frame for 500ms (decoding window)
+const TX_FRAME_MS = 700  // show each data frame longer for better camera SNR
 let txNextFrameAtMs = 0
 
 function startTxLoop(){
