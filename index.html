@@ -115,7 +115,7 @@ font-size:18px;
 }
 
 #decodeProgressWrap{ text-align:left; }
-#decodeProgressText{ min-height:1.2em; }
+#decodeProgressText{ min-height:1.2em; text-align:center; }
 </style>
 </head>
 
@@ -163,7 +163,7 @@ font-size:18px;
 </div>
 
 <div id="status" style="margin-top:8px; opacity:0.9;"></div>
-<div id="decodeDebug" style="display:none; margin-top:8px; max-width:560px; margin-left:auto; margin-right:auto; text-align:left; font:12px/1.35 ui-monospace,SFMono-Regular,Menlo,monospace; white-space:pre-wrap; background:rgba(0,0,0,0.28); border:1px solid rgba(255,255,255,0.12); border-radius:8px; padding:8px;"></div>
+<div id="decodeDebug" style="display:none; margin-top:8px; max-width:360px; margin-left:auto; margin-right:auto; text-align:left; font:12px/1.35 ui-monospace,SFMono-Regular,Menlo,monospace; white-space:pre; background:rgba(0,0,0,0.28); border:1px solid rgba(255,255,255,0.12); border-radius:8px; padding:8px; min-height:260px; max-height:260px; overflow:hidden;"></div>
 
 <a id="download">Download recovered file</a>
 
@@ -244,10 +244,12 @@ function renderDecodeDebug(dbg){
   if(dbg.marker){
     lines.push(`2) markers: ${dbg.marker.ok ? "OK" : "FAIL"} (${dbg.marker.reason})`)
     lines.push(`   scores C/M/Y/G: ${dbg.marker.cyan}/${dbg.marker.mag}/${dbg.marker.yel}/${dbg.marker.grn}`)
-    if(dbg.marker.ok){
-      lines.push(`   corners tl(${dbg.marker.tl.x},${dbg.marker.tl.y}) tr(${dbg.marker.tr.x},${dbg.marker.tr.y}) bl(${dbg.marker.bl.x},${dbg.marker.bl.y}) br(${dbg.marker.br.x},${dbg.marker.br.y})`)
-      lines.push(`   minSpan=${dbg.marker.minSpan}`)
-    }
+    const tl = dbg.marker.tl || { x: "-", y: "-" }
+    const tr = dbg.marker.tr || { x: "-", y: "-" }
+    const bl = dbg.marker.bl || { x: "-", y: "-" }
+    const br = dbg.marker.br || { x: "-", y: "-" }
+    lines.push(`   corners tl(${tl.x},${tl.y}) tr(${tr.x},${tr.y}) bl(${bl.x},${bl.y}) br(${br.x},${br.y})`)
+    lines.push(`   minSpan=${dbg.marker.minSpan != null ? dbg.marker.minSpan : "-"}`)
   }
   if(dbg.packet){
     lines.push(`3) homography+sample: ${dbg.packet.ok ? "OK" : "FAIL"} (${dbg.packet.reason})`)
@@ -257,7 +259,9 @@ function renderDecodeDebug(dbg){
     lines.push(`5) packet bytes: ${dbg.packet.byteLen}`)
   } else {
     lines.push("3) homography+sample: not reached")
-    lines.push("4) sync: not reached")
+    lines.push("   lum min/max/thr: n/a/n/a/n/a")
+    lines.push("   best pose: inset=- order=-")
+    lines.push("4) sync: raw=-/64 inv=-/64 used=none")
     lines.push("5) packet bytes: 0")
   }
   if(dbg.parse){
