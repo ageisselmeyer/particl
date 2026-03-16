@@ -168,7 +168,7 @@ flex-wrap:wrap;
 
 <body>
 
-<h2>PartiCl v2.16</h2>
+<h2>PartiCl v2.17</h2>
 
 <input type="file" id="fileInput" style="display:none">
 
@@ -982,7 +982,7 @@ function detectMarkers(img, w, h, dbg){
   }
 
   // Keep gates permissive so we lock quickly on real finder colors under varied exposure.
-  if(cyan.s < 18 || mag.s < 18 || yel.s < 18 || grn.s < 14){
+  if(cyan.s < 14 || mag.s < 14 || yel.s < 14 || grn.s < 11){
     if(dbg && dbg.marker) dbg.marker.reason = "low-color-confidence"
     return null
   }
@@ -1077,8 +1077,8 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
     [0,1,2,3], [1,2,3,0], [2,3,0,1], [3,0,1,2],
     [0,3,2,1], [3,2,1,0], [2,1,0,3], [1,0,3,2]
   ]
-  const insetCandidates = [0.62, 0.66, 0.70, 0.72, 0.74, 0.78]
-  const scaleCandidates = [0.55, 0.65, 0.75, 0.85, 1.0]
+  const insetCandidates = [0.50, 0.56, 0.62, 0.66, 0.70, 0.72, 0.74, 0.78, 0.82]
+  const scaleCandidates = [0.45, 0.55, 0.65, 0.75, 0.85, 1.0]
   const dst = [{x:0,y:0},{x:1,y:0},{x:1,y:1},{x:0,y:1}]
 
   function evaluatePose(orderIdx, inset, carrierScale){
@@ -1095,10 +1095,14 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
     let minMin=1e9, maxMin=-1e9
     let minBlueMax=1e9, maxBlueMax=-1e9
     let minBlueMin=1e9, maxBlueMin=-1e9
+    let minInkMax=1e9, maxInkMax=-1e9
+    let minInkMin=1e9, maxInkMin=-1e9
     const lumMax = new Float32Array(FRAME_BITS)
     const lumMin = new Float32Array(FRAME_BITS)
     const blueMax = new Float32Array(FRAME_BITS)
     const blueMin = new Float32Array(FRAME_BITS)
+    const inkMax = new Float32Array(FRAME_BITS)
+    const inkMin = new Float32Array(FRAME_BITS)
     let idx=0
     for(let y=0;y<GRID;y++){
       for(let x=0;x<GRID;x++){
@@ -1114,6 +1118,8 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
         let Lmin = 1
         let Bmax = 0
         let Bmin = 1
+        let Imax = 0
+        let Imin = 1
         for(let oy=-1; oy<=1; oy++){
           for(let ox=-1; ox<=1; ox++){
             const sx = px + ox
@@ -1123,16 +1129,21 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
             const l=(0.2126*r + 0.7152*g + 0.0722*b)/255
             // Blue-emphasis metric in [0..1]. Robust for dark-blue ON dots on white.
             const bl = 0.5 + 0.5 * ((b - 0.5 * (r + g)) / 255)
+            const ink = 1 - l
             if(l > Lmax) Lmax = l
             if(l < Lmin) Lmin = l
             if(bl > Bmax) Bmax = bl
             if(bl < Bmin) Bmin = bl
+            if(ink > Imax) Imax = ink
+            if(ink < Imin) Imin = ink
           }
         }
         lumMax[idx] = Lmax
         lumMin[idx] = Lmin
         blueMax[idx] = Bmax
         blueMin[idx] = Bmin
+        inkMax[idx] = Imax
+        inkMin[idx] = Imin
         idx++
         if(Lmax<minMax) minMax=Lmax
         if(Lmax>maxMax) maxMax=Lmax
@@ -1142,18 +1153,24 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
         if(Bmax>maxBlueMax) maxBlueMax=Bmax
         if(Bmin<minBlueMin) minBlueMin=Bmin
         if(Bmin>maxBlueMin) maxBlueMin=Bmin
+        if(Imax<minInkMax) minInkMax=Imax
+        if(Imax>maxInkMax) maxInkMax=Imax
+        if(Imin<minInkMin) minInkMin=Imin
+        if(Imin>maxInkMin) maxInkMin=Imin
       }
     }
     const spanMax = maxMax - minMax
     const spanMin = maxMin - minMin
     const spanBlueMax = maxBlueMax - minBlueMax
     const spanBlueMin = maxBlueMin - minBlueMin
-    if(spanMax < 0.02 && spanMin < 0.02 && spanBlueMax < 0.02 && spanBlueMin < 0.02){
+    const spanInkMax = maxInkMax - minInkMax
+    const spanInkMin = maxInkMin - minInkMin
+    if(spanMax < 0.02 && spanMin < 0.02 && spanBlueMax < 0.02 && spanBlueMin < 0.02 && spanInkMax < 0.02 && spanInkMin < 0.02){
       return {
         match: -1,
         reason: "low-contrast",
-        min: Math.min(minMax, minMin, minBlueMax, minBlueMin),
-        max: Math.max(maxMax, maxMin, maxBlueMax, maxBlueMin),
+        min: Math.min(minMax, minMin, minBlueMax, minBlueMin, minInkMax, minInkMin),
+        max: Math.max(maxMax, maxMin, maxBlueMax, maxBlueMin, maxInkMax, maxInkMin),
         inset,
         orderIdx
       }
@@ -1209,11 +1226,15 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
     const minPath = scoreSignal(lumMin)
     const blueMaxPath = scoreSignal(blueMax)
     const blueMinPath = scoreSignal(blueMin)
+    const inkMaxPath = scoreSignal(inkMax)
+    const inkMinPath = scoreSignal(inkMin)
     const candidates = [
       { ...maxPath, mode: "luma-max", min:minMax, max:maxMax },
       { ...minPath, mode: "luma-min", min:minMin, max:maxMin },
       { ...blueMaxPath, mode: "blue-max", min:minBlueMax, max:maxBlueMax },
-      { ...blueMinPath, mode: "blue-min", min:minBlueMin, max:maxBlueMin }
+      { ...blueMinPath, mode: "blue-min", min:minBlueMin, max:maxBlueMin },
+      { ...inkMaxPath, mode: "ink-max", min:minInkMax, max:maxInkMax },
+      { ...inkMinPath, mode: "ink-min", min:minInkMin, max:maxInkMin }
     ]
     let chosen = candidates[0]
     for(let i=1;i<candidates.length;i++){
@@ -1222,7 +1243,7 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
     const used = chosen.used
     return {
       match: used,
-      reason: used >= 46 ? "ok" : "sync-too-low",
+      reason: used >= 40 ? "ok" : "sync-too-low",
       bits: chosen.bits,
       min: chosen.min,
       max: chosen.max,
@@ -1279,7 +1300,7 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
     }
     totalChunks = parseInt(totalBits, 2) >>> 0
   }
-  if(bestPose.match < 46){
+  if(bestPose.match < 40){
     if(dbg && dbg.packet) dbg.packet.reason = bestPose.reason || "sync-too-low"
     return { pkt: null, totalChunks }
   }
@@ -1394,7 +1415,7 @@ ctx.fillRect(x,y,size,size)
 }
 
 function drawFinders(){
-  const M = 32;
+  const M = 38;
   const pad = 16;
   const w = canvas.width - pad*2, h = canvas.height - pad*2;
   const cellW = w / GRID, cellH = h / GRID;
@@ -1411,10 +1432,10 @@ function drawFinders(){
     ctx.arc(cx, cy, rr, 0, Math.PI * 2)
     ctx.fill()
   }
-  drawCorner(x1 + rr, y1 + rr, "rgba(0,210,230,0.82)")
-  drawCorner(x2 + rr, y1 + rr, "rgba(235,70,220,0.82)")
-  drawCorner(x1 + rr, y2 + rr, "rgba(235,220,40,0.82)")
-  drawCorner(x2 + rr, y2 + rr, "rgba(40,205,75,0.82)")
+  drawCorner(x1 + rr, y1 + rr, "rgba(0,210,230,0.96)")
+  drawCorner(x2 + rr, y1 + rr, "rgba(235,70,220,0.96)")
+  drawCorner(x1 + rr, y2 + rr, "rgba(235,220,40,0.96)")
+  drawCorner(x2 + rr, y2 + rr, "rgba(40,205,75,0.96)")
 }
 
 const TX_FRAME_MS = 500  // show each data frame for 500ms (decoding window)
