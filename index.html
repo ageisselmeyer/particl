@@ -355,7 +355,7 @@ function renderDecodeDebug(dbg){
   if(dbg.packet){
     lines.push(`3) homography+sample: ${dbg.packet.ok ? "OK" : "FAIL"} (${dbg.packet.reason})`)
     lines.push(`   lum min/max/thr: ${fmt2(dbg.packet.minL)}/${fmt2(dbg.packet.maxL)}/${fmt2(dbg.packet.thr)}`)
-    lines.push(`   best pose: inset=${dbg.packet.inset || 0} order=${dbg.packet.order} mode=${dbg.packet.sampleMode || "?"}`)
+    lines.push(`   best pose: inset=${dbg.packet.inset || 0} scale=${dbg.packet.scale || 1} order=${dbg.packet.order} mode=${dbg.packet.sampleMode || "?"}`)
     lines.push(`4) sync: raw=${dbg.packet.syncMatch}/64 inv=${dbg.packet.syncMatchInv}/64 used=${dbg.packet.syncUsed}`)
     lines.push(`5) packet bytes: ${dbg.packet.byteLen}`)
   } else {
@@ -1068,7 +1068,8 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
       syncUsed: "none",
       byteLen: 0,
       inset: 0,
-      order: -1
+      order: -1,
+      scale: 1
     }
   }
   const base = [corners.tl, corners.tr, corners.br, corners.bl].map(p=>({x:p.x,y:p.y}))
@@ -1077,9 +1078,10 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
     [0,3,2,1], [3,2,1,0], [2,1,0,3], [1,0,3,2]
   ]
   const insetCandidates = [0.62, 0.66, 0.70, 0.72, 0.74, 0.78]
+  const scaleCandidates = [0.55, 0.65, 0.75, 0.85, 1.0]
   const dst = [{x:0,y:0},{x:1,y:0},{x:1,y:1},{x:0,y:1}]
 
-  function evaluatePose(orderIdx, inset){
+  function evaluatePose(orderIdx, inset, carrierScale){
     const ord = orders[orderIdx]
     const raw = [base[ord[0]], base[ord[1]], base[ord[2]], base[ord[3]]]
     const cx = (raw[0].x+raw[1].x+raw[2].x+raw[3].x)/4
@@ -1102,7 +1104,9 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
       for(let x=0;x<GRID;x++){
         const gridIdx = y*GRID + x
         if(!CARRIER_MASK[gridIdx]) continue
-        const u=(x+0.5)/GRID, v=(y+0.5)/GRID
+        const u0=(x+0.5)/GRID, v0=(y+0.5)/GRID
+        const u=0.5 + (u0 - 0.5) * carrierScale
+        const v=0.5 + (v0 - 0.5) * carrierScale
         const p=mapPoint(inv,u,v)
         const px=Math.max(1,Math.min(w-2,Math.floor(p.x)))
         const py=Math.max(1,Math.min(h-2,Math.floor(p.y)))
@@ -1228,6 +1232,7 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
       syncUsed: chosen.best.useInv ? "inverted" : "normal",
       sampleMode: chosen.mode,
       inset,
+      scale: carrierScale,
       orderIdx
     }
   }
@@ -1235,8 +1240,10 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
   let bestPose = null
   for(let oi=0; oi<orders.length; oi++){
     for(const inset of insetCandidates){
-      const pose = evaluatePose(oi, inset)
-      if(!bestPose || pose.match > bestPose.match) bestPose = pose
+      for(const scale of scaleCandidates){
+        const pose = evaluatePose(oi, inset, scale)
+        if(!bestPose || pose.match > bestPose.match) bestPose = pose
+      }
     }
   }
 
@@ -1253,6 +1260,7 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
     dbg.packet.syncUsed = bestPose.syncUsed || "none"
     dbg.packet.sampleMode = bestPose.sampleMode || "?"
     dbg.packet.inset = bestPose.inset
+    dbg.packet.scale = bestPose.scale != null ? bestPose.scale : 1
     dbg.packet.order = bestPose.orderIdx
   }
   const totalStart = SYNC.length
