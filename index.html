@@ -355,7 +355,7 @@ function renderDecodeDebug(dbg){
   if(dbg.packet){
     lines.push(`3) homography+sample: ${dbg.packet.ok ? "OK" : "FAIL"} (${dbg.packet.reason})`)
     lines.push(`   lum min/max/thr: ${fmt2(dbg.packet.minL)}/${fmt2(dbg.packet.maxL)}/${fmt2(dbg.packet.thr)}`)
-    lines.push(`   best pose: inset=${dbg.packet.inset || 0} scale=${dbg.packet.scale || 1} order=${dbg.packet.order} mode=${dbg.packet.sampleMode || "?"} shift=${dbg.packet.bitShift || 0}`)
+    lines.push(`   best pose: inset=${dbg.packet.inset || 0} scale=${dbg.packet.scale || 1} order=${dbg.packet.order} mode=${dbg.packet.sampleMode || "?"} shift=${dbg.packet.bitShift || 0} off=${dbg.packet.byteOffset || 0}`)
     lines.push(`4) sync: raw=${dbg.packet.syncMatch}/64 inv=${dbg.packet.syncMatchInv}/64 used=${dbg.packet.syncUsed}`)
     lines.push(`5) packet bytes: ${dbg.packet.byteLen}`)
   } else {
@@ -1070,7 +1070,8 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
       inset: 0,
       order: -1,
       scale: 1,
-      bitShift: 0
+      bitShift: 0,
+      byteOffset: 0
     }
   }
   const base = [corners.tl, corners.tr, corners.br, corners.bl].map(p=>({x:p.x,y:p.y}))
@@ -1309,35 +1310,37 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
   function tryPacketFromShift(shift){
     const bytes = bitsToBytes(payloadBits.slice(shift))
     if(bytes.length < 9) return null
-    const magic = String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3])
-    if(magic !== MAGIC) return null
-    const kind = bytes[4]
-    if(kind === 2){
-      let off = 5
-      if(bytes.length < off + 4 + 4 + 1 + 4 + 2 + 2) return null
-      off += 4 + 4 + 1 + 4 + 2
-      const payloadLen = bytesToU16LE(bytes, off); off += 2
-      const pktLen = off + payloadLen + 4
-      if(pktLen > bytes.length) return null
-      const pkt = bytes.slice(0, pktLen)
-      const crc = bytesToU32LE(pkt, pktLen - 4)
-      const calc = crc32(pkt.slice(0, pktLen - 4))
-      if(calc !== crc) return null
-      return { pkt, shift }
-    }
-    if(kind === 1){
-      let off = 5
-      if(bytes.length < off + 4 + 4 + 2 + 4 + 2 + 2) return null
-      off += 4 + 4 + 2 + 4
-      const nameLen = bytesToU16LE(bytes, off); off += 2
-      const typeLen = bytesToU16LE(bytes, off); off += 2
-      const pktLen = off + nameLen + typeLen + 4
-      if(pktLen > bytes.length) return null
-      const pkt = bytes.slice(0, pktLen)
-      const crc = bytesToU32LE(pkt, pktLen - 4)
-      const calc = crc32(pkt.slice(0, pktLen - 4))
-      if(calc !== crc) return null
-      return { pkt, shift }
+    const m0 = MAGIC.charCodeAt(0), m1 = MAGIC.charCodeAt(1), m2 = MAGIC.charCodeAt(2), m3 = MAGIC.charCodeAt(3)
+    for(let start=0; start<=bytes.length-9; start++){
+      if(bytes[start] !== m0 || bytes[start+1] !== m1 || bytes[start+2] !== m2 || bytes[start+3] !== m3) continue
+      const kind = bytes[start + 4]
+      if(kind === 2){
+        let off = start + 5
+        if(bytes.length < off + 4 + 4 + 1 + 4 + 2 + 2) continue
+        off += 4 + 4 + 1 + 4 + 2
+        const payloadLen = bytesToU16LE(bytes, off); off += 2
+        const pktLen = (off - start) + payloadLen + 4
+        if(start + pktLen > bytes.length) continue
+        const pkt = bytes.slice(start, start + pktLen)
+        const crc = bytesToU32LE(pkt, pktLen - 4)
+        const calc = crc32(pkt.slice(0, pktLen - 4))
+        if(calc !== crc) continue
+        return { pkt, shift, start }
+      }
+      if(kind === 1){
+        let off = start + 5
+        if(bytes.length < off + 4 + 4 + 2 + 4 + 2 + 2) continue
+        off += 4 + 4 + 2 + 4
+        const nameLen = bytesToU16LE(bytes, off); off += 2
+        const typeLen = bytesToU16LE(bytes, off); off += 2
+        const pktLen = (off - start) + nameLen + typeLen + 4
+        if(start + pktLen > bytes.length) continue
+        const pkt = bytes.slice(start, start + pktLen)
+        const crc = bytesToU32LE(pkt, pktLen - 4)
+        const calc = crc32(pkt.slice(0, pktLen - 4))
+        if(calc !== crc) continue
+        return { pkt, shift, start }
+      }
     }
     return null
   }
@@ -1352,6 +1355,7 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
     dbg.packet.reason = "ok"
     dbg.packet.byteLen = out.length
     dbg.packet.bitShift = aligned ? aligned.shift : 0
+    dbg.packet.byteOffset = aligned ? aligned.start : 0
   }
   return { pkt: out, totalChunks }
 }
