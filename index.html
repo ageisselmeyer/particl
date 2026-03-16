@@ -168,7 +168,7 @@ flex-wrap:wrap;
 
 <body>
 
-<h2>PartiCl v2.22</h2>
+<h2>PartiCl v2.23</h2>
 
 <input type="file" id="fileInput" style="display:none">
 
@@ -414,7 +414,7 @@ void main(){
   // 3D look comes from depth/size/color, not large XY warping.
   float depthSeed = (rndA * 2.0 - 1.0) * (0.18 + 0.14 * z);
   float zWave = 0.02 * sin(uTime * 0.40 + radial * 4.2 + rndB * 6.283);
-  vec2 cloudXY = ndc0 * 0.38;
+  vec2 cloudXY = ndc0 * 0.52;
   vec3 p = vec3(cloudXY, depthSeed + zWave);
   float cam = 2.75;
   float persp = cam / (cam - p.z);
@@ -425,7 +425,7 @@ void main(){
   float depth01 = clamp((p.z + 1.3) / 2.6, 0.0, 1.0);
   float pulse = 0.985 + 0.03 * sin(uTime * 0.95 + z * 8.0 + rndB * 6.283);
   float vis = on;
-  gl_PointSize = mix(5.8, 15.8, depth01) * pulse * vis;
+  gl_PointSize = mix(4.6, 11.8, depth01) * pulse * vis;
   vec3 deepBlue = vec3(0.02, 0.16, 0.74);
   vec3 lightBlue = vec3(0.11, 0.48, 0.98);
   vec3 onCol = mix(deepBlue, lightBlue, 0.22 + 0.78*depth01) * (0.94 + 0.52*depth01);
@@ -473,7 +473,7 @@ void main(){
   float radial = clamp(length(ndc0), 0.0, 1.0);
   float depthSeed = (rndA * 2.0 - 1.0) * (0.18 + 0.14 * z);
   float zWave = 0.02 * sin(uTime * 0.40 + radial * 4.2 + rndB * 6.283);
-  vec2 cloudXY = ndc0 * 0.38;
+  vec2 cloudXY = ndc0 * 0.52;
   vec3 p = vec3(cloudXY, depthSeed + zWave);
   float cam = 2.75;
   float persp = cam / (cam - p.z);
@@ -484,7 +484,7 @@ void main(){
   float depth01 = clamp((p.z + 1.3) / 2.6, 0.0, 1.0);
   float pulse = 0.985 + 0.03 * sin(uTime * 0.95 + z * 8.0 + rndB * 6.283);
   float vis = on;
-  gl_PointSize = mix(5.8, 15.8, depth01) * pulse * vis;
+  gl_PointSize = mix(4.6, 11.8, depth01) * pulse * vis;
   vec3 deepBlue = vec3(0.02, 0.16, 0.74);
   vec3 lightBlue = vec3(0.11, 0.48, 0.98);
   vec3 onCol = mix(deepBlue, lightBlue, 0.22 + 0.78*depth01) * (0.94 + 0.52*depth01);
