@@ -168,7 +168,7 @@ flex-wrap:wrap;
 
 <body>
 
-<h2>PartiCl v2.12</h2>
+<h2>PartiCl v2.13</h2>
 
 <input type="file" id="fileInput" style="display:none">
 
@@ -244,6 +244,8 @@ let decodeRateSamples = []  // { t, have } for ETA
 let decodeFramesReceived = 0  // count decoded frames (so user sees activity before meta)
 let decodeExpectedTotal = null // best-known total chunk count (K)
 const decodeTotalVotes = new Map()
+let decodeEstimatedTotal = null
+let decodeRecentTotals = []
 
 const GRID = 80 // reduced for easier decoding; fewer, larger cells
 const CARRIER_RADIUS_SQ = 0.70
@@ -294,6 +296,14 @@ function considerTotalCandidate(k, minVotes = 2){
   if(n >= minVotes) decodeExpectedTotal = kk
 }
 
+function setTotalAuthoritative(k){
+  if(!Number.isFinite(k)) return
+  const kk = k >>> 0
+  if(kk < 1 || kk > 200000) return
+  decodeExpectedTotal = kk
+  decodeTotalVotes.set(kk, Math.max(10, decodeTotalVotes.get(kk) || 0))
+}
+
 function bestTotalVoteCandidate(minVotes = 1){
   let bestK = null
   let bestN = 0
@@ -305,6 +315,23 @@ function bestTotalVoteCandidate(minVotes = 1){
     }
   }
   return bestK
+}
+
+function considerEstimatedTotal(k){
+  if(!Number.isFinite(k)) return
+  const kk = k >>> 0
+  // Loose bounds for UI-only estimate; stricter than noise, broader than expected use.
+  if(kk < 1 || kk > 20000) return
+  decodeRecentTotals.push(kk)
+  if(decodeRecentTotals.length > 9) decodeRecentTotals.shift()
+  const freq = new Map()
+  for(const v of decodeRecentTotals) freq.set(v, (freq.get(v) || 0) + 1)
+  let bestK = null
+  let bestN = 0
+  for(const [v, n] of freq.entries()){
+    if(n > bestN){ bestN = n; bestK = v }
+  }
+  if(bestK != null) decodeEstimatedTotal = bestK
 }
 
 function renderDecodeDebug(dbg){
@@ -1494,6 +1521,8 @@ decodeRateSamples = []
 decodeFramesReceived = 0
 decodeExpectedTotal = null
 decodeTotalVotes.clear()
+decodeEstimatedTotal = null
+decodeRecentTotals = []
 decodeLoop._frameNo = 0
 if(decodeProgressWrap) decodeProgressWrap.style.display = "block"
 if(decodeProgressBar) decodeProgressBar.style.width = "0%"
@@ -1534,6 +1563,7 @@ function decodeLoop(){
   const totalLabel = () => {
     if(decodeExpectedTotal != null && decodeExpectedTotal > 0 && decodeExpectedTotal <= 200000) return String(decodeExpectedTotal)
     if(rxFountain && rxFountain.K != null && rxFountain.K > 0 && rxFountain.K <= 200000) return String(rxFountain.K)
+    if(decodeEstimatedTotal != null && decodeEstimatedTotal > 0) return "~" + String(decodeEstimatedTotal)
     const voted = bestTotalVoteCandidate(1)
     if(voted != null) return "~" + String(voted)
     return "?"
@@ -1640,8 +1670,10 @@ function decodeLoop(){
 
   const frameDecoded = decodePacketFromFrame(img.data, sampSize, sampSize, corners, dbg)
   if(frameDecoded && frameDecoded.totalChunks > 0){
-    // Total is encoded redundantly in every frame; decode immediately.
-    considerTotalCandidate(frameDecoded.totalChunks, 1)
+    // Always keep a rolling UI estimate so total does not remain "?" while locking.
+    considerEstimatedTotal(frameDecoded.totalChunks)
+    // Raw bit-level total can be noisy; keep only as low-confidence fallback.
+    considerTotalCandidate(frameDecoded.totalChunks, 5)
   }
   const pkt = frameDecoded ? frameDecoded.pkt : null
   const parseInfo = { ok: false, reason: "no-packet" }
@@ -1655,14 +1687,33 @@ function decodeLoop(){
       }else{
         parseInfo.ok = true
         parseInfo.reason = `magic=${magic} kind=${pkt[4]} len=${pkt.length}`
-        // Extract K (total chunks) as early as possible for a stable "x / total" counter.
+        // Extract K from CRC-valid packet headers; this is authoritative and immediate.
         const kind = pkt[4]
-        if(kind === 1 && pkt.length >= 19){
+        if(kind === 2 && pkt.length >= (5 + 4 + 4 + 1 + 4 + 2 + 2 + 4)){
+          let off = 5
+          const _fileId = bytesToU32LE(pkt, off); off += 4
+          const _seed = bytesToU32LE(pkt, off); off += 4
+          const _d = pkt[off]; off += 1
+          const kData = bytesToU32LE(pkt, off); off += 4
+          const _chunkSize = bytesToU16LE(pkt, off); off += 2
+          const payloadLen = bytesToU16LE(pkt, off); off += 2
+          const pktLen = off + payloadLen + 4
+          if(pktLen <= pkt.length){
+            const sliced = pkt.slice(0, pktLen)
+            const crc = bytesToU32LE(sliced, pktLen - 4)
+            const calc = crc32(sliced.slice(0, pktLen - 4))
+            if(calc === crc){
+              setTotalAuthoritative(kData)
+            }else{
+              parseInfo.reason += " crc-mismatch"
+            }
+          }else{
+            parseInfo.reason += " pktlen-overrun"
+          }
+        }else if(kind === 1 && pkt.length >= (5 + 4 + 4 + 2 + 4 + 2 + 2 + 4)){
+          // Legacy/support path only; current TX no longer emits meta packets.
           const kMeta = bytesToU32LE(pkt, 15)
-          considerTotalCandidate(kMeta, 1)
-        }else if(kind === 2 && pkt.length >= 18){
-          const kData = bytesToU32LE(pkt, 14)
-          considerTotalCandidate(kData, 1)
+          considerTotalCandidate(kMeta, 2)
         }
       }
     }
