@@ -124,15 +124,9 @@ font-size:18px;
 
 <body>
 
-<h2>PartiCl v2.07</h2>
+<h2>PartiCl v2.08</h2>
 
 <input type="file" id="fileInput" style="display:none">
-
-<div id="chooseFileWrap" style="display:none">
-  <button type="button" id="chooseFileBtn">Choose file</button>
-</div>
-
-<br>
 
 <div id="modeButtons">
   <button onclick="encode()">◇ Encode</button>
@@ -188,9 +182,6 @@ const finderBL = document.getElementById("finderBL")
 const particleCloudBoxEl = document.getElementById("particleCloudBox")
 const statusEl = document.getElementById("status")
 const fileInputEl = document.getElementById("fileInput")
-const chooseFileWrap = document.getElementById("chooseFileWrap")
-const chooseFileBtn = document.getElementById("chooseFileBtn")
-chooseFileBtn.addEventListener("click", () => fileInputEl.click())
 const modeButtonsEl = document.getElementById("modeButtons")
 const canvasWrapEl = document.getElementById("canvasWrap")
 const decodeProgressWrap = document.getElementById("decodeProgressWrap")
@@ -200,6 +191,7 @@ const decodeDebugEl = document.getElementById("decodeDebug")
 let decodeRateSamples = []  // { t, have } for ETA
 let decodeFramesReceived = 0  // count decoded frames (so user sees activity before meta)
 let decodeExpectedTotal = null // best-known total chunk count (K)
+const decodeTotalVotes = new Map()
 
 const GRID = 80 // reduced for easier decoding; fewer, larger cells
 const CARRIER_RADIUS_SQ = 0.70
@@ -238,6 +230,16 @@ let txSessionNonce = 0
 
 function fmt2(n){
   return Number.isFinite(n) ? n.toFixed(2) : "n/a"
+}
+
+function considerTotalCandidate(k, minVotes = 2){
+  if(!Number.isFinite(k)) return
+  const kk = k >>> 0
+  // Plausible bounds for this app; filters random bit noise.
+  if(kk < 1 || kk > 200000) return
+  const n = (decodeTotalVotes.get(kk) || 0) + 1
+  decodeTotalVotes.set(kk, n)
+  if(n >= minVotes) decodeExpectedTotal = kk
 }
 
 function renderDecodeDebug(dbg){
@@ -404,52 +406,9 @@ function encode(){
 
 hideModeButtons()
 if(decodeDebugEl) decodeDebugEl.style.display = "none"
-
-// First click: show "Choose file" button and open picker; file input stays hidden.
-if(chooseFileWrap.style.display === "none" || !chooseFileWrap.style.display){
-  fileInputEl.value = ""
-  chooseFileWrap.style.display = "block"
-  setStatus("Choose a file to start encoding.")
-  fileInputEl.click()
-  return
-}
-
-// If picker is visible but no file selected yet, open it again.
-let file=fileInputEl.files[0]
-if(!file){
-  setStatus("Choose a file to start encoding.")
-  fileInputEl.click()
-  return
-}
-
-let reader=new FileReader()
-
-reader.onload=async ()=>{
-
-const buffer = reader.result
-const bytes = new Uint8Array(buffer)
-
-txMeta = {
-  name: file.name || "recovered_file",
-  type: file.type || "application/octet-stream",
-  size: bytes.length
-}
-
-const payloadBytes = buildPayload(bytes, txMeta)
-const payloadBits = bytesToBits(payloadBytes)
-const framedBits = SYNC + payloadBits
-
-buildFrames(framedBits)
-initParticles()
-
-txRun++
-frameIndex = 0
-setStatus(`Encoding “${txMeta.name}” (${txMeta.size} bytes). Streaming ${Math.ceil(frames.length/3)} frames…`)
-startTxLoop()
-
-}
-
-reader.readAsArrayBuffer(file)
+fileInputEl.value = ""
+setStatus("Choose a file to start encoding.")
+fileInputEl.click()
 
 }
 
@@ -1275,7 +1234,6 @@ async function startDecoder(){
 
 hideModeButtons()
 fileInputEl.style.display = "none"
-if(chooseFileWrap) chooseFileWrap.style.display = "none"
 if(canvasWrapEl) canvasWrapEl.style.display = "none"
 
 let stream = null
@@ -1316,6 +1274,7 @@ rxFountain = new FountainRx()
 decodeRateSamples = []
 decodeFramesReceived = 0
 decodeExpectedTotal = null
+decodeTotalVotes.clear()
 decodeLoop._frameNo = 0
 if(decodeProgressWrap) decodeProgressWrap.style.display = "block"
 if(decodeProgressBar) decodeProgressBar.style.width = "0%"
@@ -1354,8 +1313,8 @@ const rxState = {
 function decodeLoop(){
   const dbg = { frameNo: (decodeLoop._frameNo = (decodeLoop._frameNo || 0) + 1) }
   const totalLabel = () => {
-    if(decodeExpectedTotal != null) return String(decodeExpectedTotal)
-    if(rxFountain && rxFountain.K != null && rxFountain.K > 0) return String(rxFountain.K)
+    if(decodeExpectedTotal != null && decodeExpectedTotal > 0 && decodeExpectedTotal <= 200000) return String(decodeExpectedTotal)
+    if(rxFountain && rxFountain.K != null && rxFountain.K > 0 && rxFountain.K <= 200000) return String(rxFountain.K)
     return "?"
   }
   const vw = video.videoWidth || 0
@@ -1459,8 +1418,9 @@ function decodeLoop(){
   }
 
   const frameDecoded = decodePacketFromFrame(img.data, sampSize, sampSize, corners, dbg)
-  if(frameDecoded && frameDecoded.totalChunks > 0 && frameDecoded.totalChunks <= 200000){
-    decodeExpectedTotal = frameDecoded.totalChunks
+  if(frameDecoded && frameDecoded.totalChunks > 0){
+    // Bit-level total is noisy; require repeated agreement.
+    considerTotalCandidate(frameDecoded.totalChunks, 3)
   }
   const pkt = frameDecoded ? frameDecoded.pkt : null
   const parseInfo = { ok: false, reason: "no-packet" }
@@ -1478,10 +1438,10 @@ function decodeLoop(){
         const kind = pkt[4]
         if(kind === 1 && pkt.length >= 19){
           const kMeta = bytesToU32LE(pkt, 15)
-          if(kMeta > 0) decodeExpectedTotal = kMeta
+          considerTotalCandidate(kMeta, 1)
         }else if(kind === 2 && pkt.length >= 18){
           const kData = bytesToU32LE(pkt, 14)
-          if(kData > 0) decodeExpectedTotal = kData
+          considerTotalCandidate(kData, 1)
         }
       }
     }
@@ -1492,7 +1452,7 @@ function decodeLoop(){
     const before = rxFountain.progress()
     rxFountain.ingestPacket(pkt)
     const prog = rxFountain.progress()
-    if(prog.need > 0) decodeExpectedTotal = prog.need
+    if(prog.need > 0) considerTotalCandidate(prog.need, 1)
     dbg.ingest = `progress ${before.have}/${before.need} -> ${prog.have}/${prog.need}`
     if(prog.need > 0){
       const pct = Math.min(100, Math.floor((prog.have / prog.need) * 100))
