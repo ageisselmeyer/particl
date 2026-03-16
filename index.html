@@ -6,8 +6,8 @@
 
 <style>
 body{
-background:#050505;
-color:white;
+background:#ffffff;
+color:#0a2340;
 font-family:Arial,Helvetica,sans-serif;
 text-align:center;
 }
@@ -15,9 +15,9 @@ text-align:center;
 /* Galaxy/space style for all buttons and file input */
 button,
 input[type="file"]{
-background:linear-gradient(145deg, #0d0a18 0%, #1a1530 50%, #0f0d1a 100%);
-color:#e8e4f4;
-border:1px solid rgba(120, 180, 255, 0.35);
+background:#ffffff;
+color:#0a2340;
+border:1px solid rgba(60, 120, 220, 0.35);
 border-radius:12px;
 padding:12px 24px;
 margin:10px;
@@ -25,14 +25,14 @@ font-size:15px;
 font-weight:600;
 letter-spacing:0.06em;
 text-transform:uppercase;
-box-shadow:0 0 20px rgba(100, 150, 255, 0.15), inset 0 1px 0 rgba(255,255,255,0.06);
+box-shadow:0 0 10px rgba(80, 120, 200, 0.10), inset 0 1px 0 rgba(255,255,255,0.9);
 transition:border-color 0.2s, box-shadow 0.2s, transform 0.15s;
 cursor:pointer;
 }
 button:hover,
 input[type="file"]:hover{
-border-color:rgba(140, 200, 255, 0.6);
-box-shadow:0 0 28px rgba(100, 180, 255, 0.25), inset 0 1px 0 rgba(255,255,255,0.08);
+border-color:rgba(70, 130, 230, 0.6);
+box-shadow:0 0 16px rgba(90, 140, 230, 0.18), inset 0 1px 0 rgba(255,255,255,0.95);
 transform:translateY(-1px);
 }
 button:active,
@@ -54,7 +54,7 @@ cursor:pointer;
 }
 
 canvas{
-background:black;
+background:#ffffff;
 border-radius:16px;
 margin-top:20px;
 }
@@ -65,6 +65,8 @@ width:560px;
 height:560px;
 margin:20px auto 0;
 overflow:hidden;
+background:#ffffff;
+border-radius:16px;
 }
 
 #bg,#tx{
@@ -77,8 +79,8 @@ margin-top:0;
 }
 
 /* Let the WebGL galaxy show through */
-#bg{ background:black; }
-#tx{ background:transparent; }
+#bg{ background:#ffffff; }
+#tx{ background:#ffffff; }
 
 #videoWrap{
 position:relative;
@@ -104,7 +106,7 @@ object-position:center;
 z-index:0;
 }
 
-#finderOverlay{ position:absolute; left:0; top:0; width:100%; height:100%; pointer-events:none; z-index:1; }
+#finderOverlay{ position:absolute; left:0; top:0; width:100%; height:100%; pointer-events:none; z-index:1; display:none; }
 .finder-box{ position:absolute; border:2px solid rgba(0,255,0,0.9); box-sizing:border-box; display:none; }
 #particleCloudBox{ position:absolute; border:2px solid rgba(0,255,0,0.85); box-sizing:border-box; display:none; pointer-events:none; }
 
@@ -122,7 +124,7 @@ font-size:18px;
 
 <body>
 
-<h2>PartiCl v2.05</h2>
+<h2>PartiCl v2.06</h2>
 
 <input type="file" id="fileInput" style="display:none">
 
@@ -217,6 +219,7 @@ const CARRIER_MASK = (() => {
 const FRAME_BITS = CARRIER_MASK.reduce((a, b) => a + b, 0)
 const SYNC = "1100110011110000101010101100110011001100111100001010101011001100" // 64-bit sync marker
 const TOTAL_CHUNKS_BITS = 32 // fixed total-chunks field on every frame
+const TOTAL_CHUNKS_REPEATS = 3 // repeat for majority decode robustness
 const MAGIC = "VTX2" // 4 bytes (32 bits)
 const FILE_ID = (crypto && crypto.getRandomValues) ? crypto.getRandomValues(new Uint32Array(1))[0] >>> 0 : ((Math.random()*2**32)>>>0)
 
@@ -256,7 +259,7 @@ function renderDecodeDebug(dbg){
   if(dbg.packet){
     lines.push(`3) homography+sample: ${dbg.packet.ok ? "OK" : "FAIL"} (${dbg.packet.reason})`)
     lines.push(`   lum min/max/thr: ${fmt2(dbg.packet.minL)}/${fmt2(dbg.packet.maxL)}/${fmt2(dbg.packet.thr)}`)
-    lines.push(`   best pose: inset=${dbg.packet.inset || 0} order=${dbg.packet.order}`)
+    lines.push(`   best pose: inset=${dbg.packet.inset || 0} order=${dbg.packet.order} mode=${dbg.packet.sampleMode || "?"}`)
     lines.push(`4) sync: raw=${dbg.packet.syncMatch}/64 inv=${dbg.packet.syncMatchInv}/64 used=${dbg.packet.syncUsed}`)
     lines.push(`5) packet bytes: ${dbg.packet.byteLen}`)
   } else {
@@ -483,7 +486,7 @@ class FountainTx{
     this.meta = meta
     this.fileBytes = fileBytes
     this.fileId = (crypto && crypto.getRandomValues) ? crypto.getRandomValues(new Uint32Array(1))[0]>>>0 : ((Math.random()*2**32)>>>0)
-    const maxPayload = (FRAME_BITS - SYNC.length - TOTAL_CHUNKS_BITS) / 8 - 30
+    const maxPayload = (FRAME_BITS - SYNC.length - TOTAL_CHUNKS_BITS * TOTAL_CHUNKS_REPEATS) / 8 - 30
     this.chunkSize = Math.min(1024, Math.max(256, (maxPayload / 2) | 0))
     this.K = Math.ceil(fileBytes.length / this.chunkSize)
     this.chunks = new Array(this.K)
@@ -578,13 +581,14 @@ class FountainTx{
     }
     this.seq++
     const payloadBits = bytesToBits(pkt)
-    const needed = FRAME_BITS - SYNC.length - TOTAL_CHUNKS_BITS
+    const needed = FRAME_BITS - SYNC.length - TOTAL_CHUNKS_BITS * TOTAL_CHUNKS_REPEATS
     // Fill to full frame by repeating payload (not zero-pad) so the whole circle shows dots
     let clipped = payloadBits
     while (clipped.length < needed) clipped += payloadBits.slice(0, needed - clipped.length)
     clipped = clipped.slice(0, needed)
     const totalBits = (this.K >>> 0).toString(2).padStart(TOTAL_CHUNKS_BITS, "0")
-    return (SYNC + totalBits + clipped).padEnd(FRAME_BITS, "0").slice(0, FRAME_BITS)
+    const totalRep = totalBits.repeat(TOTAL_CHUNKS_REPEATS)
+    return (SYNC + totalRep + clipped).padEnd(FRAME_BITS, "0").slice(0, FRAME_BITS)
   }
 }
 
@@ -900,8 +904,10 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
     const inv = invertHomography(H)
     if(!inv) return { match: -1, reason: "homography-invert-failed", inset, orderIdx }
 
-    let min=1e9, max=-1e9
-    const lum = new Float32Array(FRAME_BITS)
+    let minMax=1e9, maxMax=-1e9
+    let minMin=1e9, maxMin=-1e9
+    const lumMax = new Float32Array(FRAME_BITS)
+    const lumMin = new Float32Array(FRAME_BITS)
     let idx=0
     for(let y=0;y<GRID;y++){
       for(let x=0;x<GRID;x++){
@@ -911,7 +917,8 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
         const p=mapPoint(inv,u,v)
         const px=Math.max(1,Math.min(w-2,Math.floor(p.x)))
         const py=Math.max(1,Math.min(h-2,Math.floor(p.y)))
-        let L = 0
+        let Lmax = 0
+        let Lmin = 1
         for(let oy=-1; oy<=1; oy++){
           for(let ox=-1; ox<=1; ox++){
             const sx = px + ox
@@ -919,69 +926,84 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
             const ii=(sy*w+sx)*4
             const r=img[ii], g=img[ii+1], b=img[ii+2]
             const l=(0.2126*r + 0.7152*g + 0.0722*b)/255
-            if(l > L) L = l
+            if(l > Lmax) Lmax = l
+            if(l < Lmin) Lmin = l
           }
         }
-        lum[idx++] = L
-        if(L<min) min=L
-        if(L>max) max=L
+        lumMax[idx] = Lmax
+        lumMin[idx] = Lmin
+        idx++
+        if(Lmax<minMax) minMax=Lmax
+        if(Lmax>maxMax) maxMax=Lmax
+        if(Lmin<minMin) minMin=Lmin
+        if(Lmin>maxMin) maxMin=Lmin
       }
     }
-    if(max - min < 0.02) return { match: -1, reason: "low-contrast", min, max, inset, orderIdx }
+    const spanMax = maxMax - minMax
+    const spanMin = maxMin - minMin
+    if(spanMax < 0.02 && spanMin < 0.02) return { match: -1, reason: "low-contrast", min:Math.min(minMax,minMin), max:Math.max(maxMax,maxMin), inset, orderIdx }
 
-    const bins = 64
-    const hist = new Uint32Array(bins)
-    for(let i=0;i<lum.length;i++){
-      const b = Math.max(0, Math.min(bins-1, (lum[i] * bins) | 0))
-      hist[b]++
+    function scoreLuma(lum){
+      const bins = 64
+      const hist = new Uint32Array(bins)
+      for(let i=0;i<lum.length;i++){
+        const b = Math.max(0, Math.min(bins-1, (lum[i] * bins) | 0))
+        hist[b]++
+      }
+      const total = lum.length
+      let sum = 0
+      for(let i=0;i<bins;i++) sum += i * hist[i]
+      let sumB = 0
+      let wB = 0
+      let varMax = -1
+      let thrBin = (bins/2)|0
+      for(let i=0;i<bins;i++){
+        wB += hist[i]
+        if(wB === 0) continue
+        const wF = total - wB
+        if(wF === 0) break
+        sumB += i * hist[i]
+        const mB = sumB / wB
+        const mF = (sum - sumB) / wF
+        const v = wB * wF * (mB - mF) * (mB - mF)
+        if(v > varMax){ varMax = v; thrBin = i }
+      }
+      const otsuThr = (thrBin + 0.5) / bins
+      const candidates = [-0.16,-0.12,-0.08,-0.04,0,0.04,0.08,0.12,0.16].map(d=>Math.max(0.02, Math.min(0.98, otsuThr + d)))
+      let best = { match: -1, bits: "", raw: 0, inv: 0, useInv: false, thr: otsuThr }
+      for(const thr of candidates){
+        let bits=""
+        for(let i=0;i<lum.length;i++) bits += (lum[i] > thr) ? "1":"0"
+        let rawScore = 0
+        for(let i=0;i<SYNC.length;i++) if(bits[i] === SYNC[i]) rawScore++
+        const invScore = SYNC.length - rawScore
+        const match = Math.max(rawScore, invScore)
+        if(match > best.match) best = { match, bits, raw: rawScore, inv: invScore, useInv: invScore > rawScore, thr }
+      }
+      let bits = best.bits
+      if(best.useInv){
+        let invBits = ""
+        for(let i=0;i<bits.length;i++) invBits += bits[i] === "1" ? "0" : "1"
+        bits = invBits
+      }
+      return { best, bits, used: (best.useInv ? best.inv : best.raw) }
     }
-    const total = lum.length
-    let sum = 0
-    for(let i=0;i<bins;i++) sum += i * hist[i]
-    let sumB = 0
-    let wB = 0
-    let varMax = -1
-    let thrBin = (bins/2)|0
-    for(let i=0;i<bins;i++){
-      wB += hist[i]
-      if(wB === 0) continue
-      const wF = total - wB
-      if(wF === 0) break
-      sumB += i * hist[i]
-      const mB = sumB / wB
-      const mF = (sum - sumB) / wF
-      const v = wB * wF * (mB - mF) * (mB - mF)
-      if(v > varMax){ varMax = v; thrBin = i }
-    }
-    const otsuThr = (thrBin + 0.5) / bins
-    const candidates = [-0.16,-0.12,-0.08,-0.04,0,0.04,0.08,0.12,0.16].map(d=>Math.max(0.02, Math.min(0.98, otsuThr + d)))
-    let best = { match: -1, bits: "", raw: 0, inv: 0, useInv: false, thr: otsuThr }
-    for(const thr of candidates){
-      let bits=""
-      for(let i=0;i<lum.length;i++) bits += (lum[i] > thr) ? "1":"0"
-      let rawScore = 0
-      for(let i=0;i<SYNC.length;i++) if(bits[i] === SYNC[i]) rawScore++
-      const invScore = SYNC.length - rawScore
-      const match = Math.max(rawScore, invScore)
-      if(match > best.match) best = { match, bits, raw: rawScore, inv: invScore, useInv: invScore > rawScore, thr }
-    }
-    let bits = best.bits
-    if(best.useInv){
-      let invBits = ""
-      for(let i=0;i<bits.length;i++) invBits += bits[i] === "1" ? "0" : "1"
-      bits = invBits
-    }
-    const used = best.useInv ? best.inv : best.raw
+
+    const maxPath = scoreLuma(lumMax)
+    const minPath = scoreLuma(lumMin)
+    const chosen = (maxPath.used >= minPath.used) ? { ...maxPath, mode: "max", min:minMax, max:maxMax } : { ...minPath, mode: "min", min:minMin, max:maxMin }
+    const used = chosen.used
     return {
       match: used,
       reason: used >= 46 ? "ok" : "sync-too-low",
-      bits,
-      min,
-      max,
-      thr: best.thr,
+      bits: chosen.bits,
+      min: chosen.min,
+      max: chosen.max,
+      thr: chosen.best.thr,
       syncMatch: used,
-      syncMatchInv: best.inv,
-      syncUsed: best.useInv ? "inverted" : "normal",
+      syncMatchInv: chosen.best.inv,
+      syncUsed: chosen.best.useInv ? "inverted" : "normal",
+      sampleMode: chosen.mode,
       inset,
       orderIdx
     }
@@ -1006,6 +1028,7 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
     dbg.packet.syncMatch = bestPose.syncMatch || 0
     dbg.packet.syncMatchInv = bestPose.syncMatchInv || 0
     dbg.packet.syncUsed = bestPose.syncUsed || "none"
+    dbg.packet.sampleMode = bestPose.sampleMode || "?"
     dbg.packet.inset = bestPose.inset
     dbg.packet.order = bestPose.orderIdx
   }
@@ -1013,9 +1036,20 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
     if(dbg && dbg.packet) dbg.packet.reason = bestPose.reason || "sync-too-low"
     return null
   }
-  const totalBits = bestPose.bits.slice(SYNC.length, SYNC.length + TOTAL_CHUNKS_BITS)
+  const totalStart = SYNC.length
+  const totalBlockLen = TOTAL_CHUNKS_BITS * TOTAL_CHUNKS_REPEATS
+  const totalRepBits = bestPose.bits.slice(totalStart, totalStart + totalBlockLen)
+  let totalBits = ""
+  for(let i=0;i<TOTAL_CHUNKS_BITS;i++){
+    let ones = 0
+    for(let r=0;r<TOTAL_CHUNKS_REPEATS;r++){
+      const b = totalRepBits[i + r*TOTAL_CHUNKS_BITS]
+      if(b === "1") ones++
+    }
+    totalBits += (ones >= 2) ? "1" : "0"
+  }
   const totalChunks = parseInt(totalBits, 2) >>> 0
-  const out = bitsToBytes(bestPose.bits.slice(SYNC.length + TOTAL_CHUNKS_BITS))
+  const out = bitsToBytes(bestPose.bits.slice(totalStart + totalBlockLen))
   if(dbg && dbg.packet){
     dbg.packet.ok = true
     dbg.packet.reason = "ok"
@@ -1136,19 +1170,17 @@ function drawFinders(){
   const extraGap = 10; // push finders slightly farther from particle circle
   const inset = Math.round(centerX - radiusPx - M * 0.5 - extraGap);
   const x1 = inset, x2 = canvas.width - inset - M, y1 = inset, y2 = canvas.height - inset - M;
-  ctx.fillStyle="rgb(0,255,255)"; ctx.fillRect(x1,y1,M,M)
-  ctx.fillStyle="rgb(255,0,255)"; ctx.fillRect(x2,y1,M,M)
-  ctx.fillStyle="rgb(255,255,0)"; ctx.fillRect(x1,y2,M,M)
-  ctx.fillStyle="rgb(0,255,0)"; ctx.fillRect(x2,y2,M,M)
-  // High-contrast frame around the particle cloud + finders to help phone autofocus
-  const framePad = 12;
-  const fx = x1 - framePad;
-  const fy = y1 - framePad;
-  const fw = (x2 + M + framePad) - fx;
-  const fh = (y2 + M + framePad) - fy;
-  ctx.lineWidth = 3;
-  ctx.strokeStyle = "rgba(255,255,255,0.7)";
-  ctx.strokeRect(fx, fy, fw, fh);
+  const rr = M * 0.5
+  function drawCorner(cx, cy, col){
+    ctx.fillStyle = col
+    ctx.beginPath()
+    ctx.arc(cx, cy, rr, 0, Math.PI * 2)
+    ctx.fill()
+  }
+  drawCorner(x1 + rr, y1 + rr, "rgba(0,210,230,0.82)")
+  drawCorner(x2 + rr, y1 + rr, "rgba(235,70,220,0.82)")
+  drawCorner(x1 + rr, y2 + rr, "rgba(235,220,40,0.82)")
+  drawCorner(x2 + rr, y2 + rr, "rgba(40,205,75,0.82)")
 }
 
 const TX_FRAME_HOLD = 30  // show each data frame for 30 refresh cycles (~0.5s at 60Hz) = 2 frames per second
@@ -1160,7 +1192,8 @@ function startTxLoop(){
   function loop(){
     if(runId !== txRun) return
 
-    ctx.clearRect(0,0,canvas.width,canvas.height)
+    ctx.fillStyle = "#ffffff"
+    ctx.fillRect(0,0,canvas.width,canvas.height)
 
     drawFinders()
 
@@ -1176,8 +1209,8 @@ function startTxLoop(){
     let frame=frames[frameIndex]||""
 
     // Stable screen-space carrier microdots (decodable layer).
-    // Use bright, steady dots (no shimmer) for maximum visibility.
-    ctx.globalCompositeOperation = "lighter"
+    // Use normal blending on white background so dots stay visible.
+    ctx.globalCompositeOperation = "source-over"
     let bitIdx = 0
     for(let i=0;i<particles.length;i++){
       const p = particles[i]
@@ -1186,10 +1219,12 @@ function startTxLoop(){
       // We draw ONLY “on” dots; “off” is absence.
       if(!bit) continue
 
-      const r = 1.0 + 1.4*p.z
-      const a = 0.4 + 0.4*p.z
-      ctx.fillStyle = `rgba(255,255,255,${a})`
-      ctx.fillRect(p.x - r, p.y - r, r*2, r*2)
+      const r = 1.25 + 1.7*p.z
+      const a = 0.45 + 0.45*p.z
+      ctx.fillStyle = `rgba(10,60,190,${a})`
+      ctx.beginPath()
+      ctx.arc(p.x, p.y, r, 0, Math.PI * 2)
+      ctx.fill()
     }
     ctx.globalCompositeOperation = "source-over"
 
@@ -1287,7 +1322,11 @@ const rxState = {
 
 function decodeLoop(){
   const dbg = { frameNo: (decodeLoop._frameNo = (decodeLoop._frameNo || 0) + 1) }
-  const totalLabel = () => (decodeExpectedTotal != null ? String(decodeExpectedTotal) : "?")
+  const totalLabel = () => {
+    if(decodeExpectedTotal != null) return String(decodeExpectedTotal)
+    if(rxFountain && rxFountain.K != null && rxFountain.K > 0) return String(rxFountain.K)
+    return "?"
+  }
   const vw = video.videoWidth || 0
   const vh = video.videoHeight || 0
   if(!vw || !vh){
