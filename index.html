@@ -168,7 +168,7 @@ flex-wrap:wrap;
 
 <body>
 
-<h2>PartiCl v2.13</h2>
+<h2>PartiCl v2.14</h2>
 
 <input type="file" id="fileInput" style="display:none">
 
@@ -246,6 +246,7 @@ let decodeExpectedTotal = null // best-known total chunk count (K)
 const decodeTotalVotes = new Map()
 let decodeEstimatedTotal = null
 let decodeRecentTotals = []
+const MAX_TOTAL_ESTIMATE = 8192
 
 const GRID = 80 // reduced for easier decoding; fewer, larger cells
 const CARRIER_RADIUS_SQ = 0.70
@@ -289,8 +290,8 @@ function fmt2(n){
 function considerTotalCandidate(k, minVotes = 2){
   if(!Number.isFinite(k)) return
   const kk = k >>> 0
-  // Plausible bounds for this app; filters random bit noise.
-  if(kk < 1 || kk > 200000) return
+  // Raw frame-bit totals are noisy; keep strict bounds.
+  if(kk < 1 || kk > MAX_TOTAL_ESTIMATE) return
   const n = (decodeTotalVotes.get(kk) || 0) + 1
   decodeTotalVotes.set(kk, n)
   if(n >= minVotes) decodeExpectedTotal = kk
@@ -320,8 +321,8 @@ function bestTotalVoteCandidate(minVotes = 1){
 function considerEstimatedTotal(k){
   if(!Number.isFinite(k)) return
   const kk = k >>> 0
-  // Loose bounds for UI-only estimate; stricter than noise, broader than expected use.
-  if(kk < 1 || kk > 20000) return
+  // UI estimate: keep in sane range only.
+  if(kk < 1 || kk > MAX_TOTAL_ESTIMATE) return
   decodeRecentTotals.push(kk)
   if(decodeRecentTotals.length > 9) decodeRecentTotals.shift()
   const freq = new Map()
@@ -331,7 +332,8 @@ function considerEstimatedTotal(k){
   for(const [v, n] of freq.entries()){
     if(n > bestN){ bestN = n; bestK = v }
   }
-  if(bestK != null) decodeEstimatedTotal = bestK
+  // Require repeated agreement before showing "~N".
+  if(bestK != null && bestN >= 2) decodeEstimatedTotal = bestK
 }
 
 function renderDecodeDebug(dbg){
@@ -1564,8 +1566,6 @@ function decodeLoop(){
     if(decodeExpectedTotal != null && decodeExpectedTotal > 0 && decodeExpectedTotal <= 200000) return String(decodeExpectedTotal)
     if(rxFountain && rxFountain.K != null && rxFountain.K > 0 && rxFountain.K <= 200000) return String(rxFountain.K)
     if(decodeEstimatedTotal != null && decodeEstimatedTotal > 0) return "~" + String(decodeEstimatedTotal)
-    const voted = bestTotalVoteCandidate(1)
-    if(voted != null) return "~" + String(voted)
     return "?"
   }
   const vw = video.videoWidth || 0
@@ -1673,7 +1673,7 @@ function decodeLoop(){
     // Always keep a rolling UI estimate so total does not remain "?" while locking.
     considerEstimatedTotal(frameDecoded.totalChunks)
     // Raw bit-level total can be noisy; keep only as low-confidence fallback.
-    considerTotalCandidate(frameDecoded.totalChunks, 5)
+    considerTotalCandidate(frameDecoded.totalChunks, 8)
   }
   const pkt = frameDecoded ? frameDecoded.pkt : null
   const parseInfo = { ok: false, reason: "no-packet" }
