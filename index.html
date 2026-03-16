@@ -168,7 +168,7 @@ flex-wrap:wrap;
 
 <body>
 
-<h2>PartiCl v2.17</h2>
+<h2>PartiCl v2.18</h2>
 
 <input type="file" id="fileInput" style="display:none">
 
@@ -1105,7 +1105,7 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
     [0,1,2,3], [1,2,3,0], [2,3,0,1], [3,0,1,2],
     [0,3,2,1], [3,2,1,0], [2,1,0,3], [1,0,3,2]
   ]
-  const insetCandidates = [0.62, 0.66, 0.70, 0.72, 0.74, 0.78]
+  const insetCandidates = [0.58, 0.60, 0.62, 0.66, 0.70, 0.72, 0.74, 0.78, 0.80]
   const dst = [{x:0,y:0},{x:1,y:0},{x:1,y:1},{x:0,y:1}]
 
   function evaluatePose(orderIdx, inset){
@@ -1254,7 +1254,7 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
       }
     }
     const used = chosen.used
-    const SYNC_SOFT_MIN = 42
+    const SYNC_SOFT_MIN = 40
     return {
       match: used,
       reason: used >= 46 ? "ok" : (used >= SYNC_SOFT_MIN ? "sync-weak" : "sync-too-low"),
@@ -1326,10 +1326,10 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
     }
     totalChunks = parseInt(totalBits, 2) >>> 0
   }
-  const SYNC_SOFT_MIN = 42
+  const SYNC_SOFT_MIN = 40
   if(bestPose.match < SYNC_SOFT_MIN){
     if(dbg && dbg.packet) dbg.packet.reason = bestPose.reason || "sync-too-low"
-    return { pkt: null, totalChunks }
+    return { pkt: null, totalChunks, match: bestPose.match }
   }
   const out = bitsToBytes(bestPose.bits.slice(totalStart + totalBlockLen))
   if(dbg && dbg.packet){
@@ -1337,7 +1337,7 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
     dbg.packet.reason = bestPose.match >= 46 ? "ok" : "sync-weak"
     dbg.packet.byteLen = out.length
   }
-  return { pkt: out, totalChunks }
+  return { pkt: out, totalChunks, match: bestPose.match }
 }
 
 function buildFramesFromPackets(){
@@ -1742,11 +1742,15 @@ function decodeLoop(){
 
   const frameDecoded = decodePacketFromFrame(img.data, sampSize, sampSize, corners, dbg)
   if(frameDecoded && frameDecoded.totalChunks > 0){
-    dbg.frameTotal = frameDecoded.totalChunks
-    // Always keep a rolling UI estimate so total does not remain "?" while locking.
-    considerEstimatedTotal(frameDecoded.totalChunks)
-    // Raw bit-level total can be noisy; keep only as low-confidence fallback.
-    considerTotalCandidate(frameDecoded.totalChunks, 8)
+    const m = frameDecoded.match || 0
+    const k = frameDecoded.totalChunks >>> 0
+    const sane = k >= 1 && k <= MAX_TOTAL_ESTIMATE
+    dbg.frameTotal = sane ? k : "-"
+    // Only trust frame-bit totals when sync quality is reasonably strong.
+    if(sane && m >= 46){
+      considerEstimatedTotal(k)
+      considerTotalCandidate(k, 8)
+    }
   }
   const pkt = frameDecoded ? frameDecoded.pkt : null
   const parseInfo = { ok: false, reason: "no-packet", kind: "-", kHeader: "-", payloadLen: "-", pktLen: "-", crc: "-" }
