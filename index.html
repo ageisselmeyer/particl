@@ -80,7 +80,7 @@ margin-top:0;
 
 /* Let the WebGL galaxy show through */
 #bg{ background:#ffffff; }
-#tx{ background:#ffffff; }
+#tx{ background:transparent; }
 
 #videoWrap{
 position:relative;
@@ -124,7 +124,7 @@ font-size:18px;
 
 <body>
 
-<h2>PartiCl v2.08</h2>
+<h2>PartiCl v2.10</h2>
 
 <input type="file" id="fileInput" style="display:none">
 
@@ -170,7 +170,15 @@ const canvas = document.getElementById("tx")
 const ctx = canvas.getContext("2d")
 
 const bgCanvas = document.getElementById("bg")
-const gl = bgCanvas.getContext("webgl2", { antialias:false, alpha:false, premultipliedAlpha:false })
+let gl = bgCanvas.getContext("webgl2", { antialias:false, alpha:false, premultipliedAlpha:false })
+let glKind = "none"
+if(gl){
+  glKind = "webgl2"
+}else{
+  gl = bgCanvas.getContext("webgl", { antialias:false, alpha:false, premultipliedAlpha:false }) ||
+       bgCanvas.getContext("experimental-webgl", { antialias:false, alpha:false, premultipliedAlpha:false })
+  if(gl) glKind = "webgl1"
+}
 let galaxy = null
 
 const video = document.getElementById("video")
@@ -287,61 +295,137 @@ function renderDecodeDebug(dbg){
 function initGalaxy(){
   if(!gl) return null
   try{
-    const vs = `#version 300 es
+    const vsWebgl2 = `#version 300 es
 precision highp float;
-layout(location=0) in vec4 aSeed;
+layout(location=0) in vec4 aSeed; // x,y: screen px, z: depth profile, w: bit (0/1)
 uniform float uTime;
-uniform vec2 uAspect;
+uniform vec2 uCanvas;
 out vec4 vCol;
 out float vGlow;
 out vec2 vNdc;
 vec3 rotY(vec3 p, float a){ float c=cos(a), s=sin(a); return vec3(c*p.x + s*p.z, p.y, -s*p.x + c*p.z); }
 vec3 rotX(vec3 p, float a){ float c=cos(a), s=sin(a); return vec3(p.x, c*p.y - s*p.z, s*p.y + c*p.z); }
 void main(){
-  float t=uTime;
-  vec3 p=normalize(aSeed.xyz) * (0.55 + 0.35*aSeed.w);
-  float r=aSeed.w;
-  float swirl=(1.7 + 1.1*(1.0-r))*t + r*10.0;
-  p=rotY(p, swirl);
-  p=rotX(p, sin(t*0.7 + r*6.283)*0.35);
-  float z=p.z + 1.9;
-  // Cull back hemisphere so points don't pile up on the limb (no half-circle white noise arc)
-  if(p.z < -0.12) { vNdc = vec2(10.0); gl_Position = vec4(2.0, 2.0, 0.0, 1.0); gl_PointSize = 0.0; return; }
-  vec2 ndc = p.xy / z;
-  ndc.x *= uAspect.x / uAspect.y;
-  ndc *= 1.76;  // ~2x previous 0.88 so ball is twice as large; finders stay at corners
+  float z = aSeed.z;
+  float on = step(0.5, aSeed.w);
+  vec2 ndc0 = vec2((aSeed.x / uCanvas.x) * 2.0 - 1.0, 1.0 - (aSeed.y / uCanvas.y) * 2.0);
+  float rndA = fract(sin(dot(ndc0, vec2(127.1, 311.7))) * 43758.5453123);
+  float rndB = fract(sin(dot(ndc0, vec2(269.5, 183.3))) * 43758.5453123);
+  float radial = clamp(length(ndc0), 0.0, 1.0);
+  float theta = atan(ndc0.y, ndc0.x);
+  float w = uTime * 0.42 + radial * 2.0 + rndA * 6.283;
+  float swirl = theta + 0.46 * sin(w) + 0.12 * sin(uTime * 0.9 + rndB * 6.283);
+  float baseR = radial * (0.66 + 0.12 * rndB);
+  float flowR = max(0.015, baseR + 0.05 * sin(w + rndA * 4.0));
+  vec2 flow = vec2(cos(swirl), sin(swirl)) * flowR;
+  vec2 tangent = vec2(-ndc0.y, ndc0.x);
+  vec2 advect = 0.12 * tangent * sin(w * 0.9 + rndB * 6.283) + 0.08 * ndc0 * cos(w * 0.7 + rndA * 6.283);
+  vec2 drift = 0.04 * vec2(
+    cos(w * 0.8 + rndA * 3.0),
+    sin(w * 0.7 + rndB * 4.0)
+  ) * (0.35 + 0.65 * (1.0 - radial));
+  float depthSeed = (rndA * 2.0 - 1.0) * (0.20 + 0.20 * z);
+  float zWave = 0.10 * sin(uTime * 0.75 + radial * 4.2 + rndB * 6.283);
+  vec2 cloudXY = ndc0 * 0.38 + flow * 0.25 + advect * 0.8 + drift * 0.8;
+  vec3 p = vec3(cloudXY, depthSeed + zWave);
+  float cam = 2.75;
+  float persp = cam / (cam - p.z);
+  persp = mix(1.0, persp, 0.22);
+  vec2 ndc = p.xy * 1.77 * persp;
   vNdc = ndc;
   gl_Position = vec4(ndc, 0.0, 1.0);
-  float pt = mix(2.4, 8.0, r) * (1.0 + 0.5*(p.z*0.5+0.5));
-  // Shrink points near top/bottom so halos don't bleed (removes arc artifacts)
-  float topFade = smoothstep(1.2, 1.65, ndc.y);
-  float bottomFade = smoothstep(-1.65, -1.2, ndc.y);
-  gl_PointSize = pt * (1.0 - topFade * 0.85) * mix(0.15, 1.0, bottomFade);
-  float hue = 0.58 + 0.28*sin(r*6.283 + t*0.25) + 0.08*p.z;
-  vec3 col = vec3(
-    0.62 + 0.52*sin(6.283*(hue + 0.00)),
-    0.62 + 0.52*sin(6.283*(hue + 0.33)),
-    0.62 + 0.52*sin(6.283*(hue + 0.67))
-  );
-  col = pow(col, vec3(1.25));
-  vCol = vec4(col, 0.72);
-  vGlow = 0.82 + 0.75*(p.z*0.5+0.5);
+  float depth01 = clamp((p.z + 1.3) / 2.6, 0.0, 1.0);
+  float pulse = 0.985 + 0.03 * sin(uTime * 0.95 + z * 8.0 + rndB * 6.283);
+  float vis = mix(0.20, 1.0, on);
+  gl_PointSize = mix(5.0, 14.0, depth01) * pulse * vis;
+  vec3 offBlue = vec3(0.78, 0.88, 0.98);
+  vec3 deepBlue = vec3(0.02, 0.16, 0.74);
+  vec3 lightBlue = vec3(0.11, 0.48, 0.98);
+  vec3 onCol = mix(deepBlue, lightBlue, 0.22 + 0.78*depth01) * (0.94 + 0.52*depth01);
+  vec3 col = mix(offBlue, onCol, on);
+  vCol = vec4(col, mix(0.09, 0.94, on));
+  vGlow = mix(0.34, 1.08, on) * (0.84 + 0.42*depth01);
 }`;
-    const fs = `#version 300 es
+    const fsWebgl2 = `#version 300 es
 precision highp float;
 in vec4 vCol;
 in float vGlow;
 in vec2 vNdc;
 out vec4 outColor;
 void main(){
-  if(length(vNdc) > 0.96) discard;
   vec2 uv = gl_PointCoord*2.0 - 1.0;
   float d = dot(uv,uv);
-  float core = exp(-d*12.0);
-  float halo = exp(-d*3.5)*0.4;
-  float a = (core + halo) * vCol.a;
-  outColor = vec4(vCol.rgb * (0.88*core + 0.28*halo) * vGlow, a);
+  float core = smoothstep(1.0, 0.28, d);
+  float rim = smoothstep(1.0, 0.86, d);
+  float a = core * rim * vCol.a;
+  outColor = vec4(vCol.rgb * (0.92 + 0.08 * core) * vGlow, a);
 }`;
+    const vsWebgl1 = `
+precision highp float;
+attribute vec4 aSeed;
+uniform float uTime;
+uniform vec2 uCanvas;
+varying vec4 vCol;
+varying float vGlow;
+varying vec2 vNdc;
+vec3 rotY(vec3 p, float a){ float c=cos(a), s=sin(a); return vec3(c*p.x + s*p.z, p.y, -s*p.x + c*p.z); }
+vec3 rotX(vec3 p, float a){ float c=cos(a), s=sin(a); return vec3(p.x, c*p.y - s*p.z, s*p.y + c*p.z); }
+void main(){
+  float z = aSeed.z;
+  float on = step(0.5, aSeed.w);
+  vec2 ndc0 = vec2((aSeed.x / uCanvas.x) * 2.0 - 1.0, 1.0 - (aSeed.y / uCanvas.y) * 2.0);
+  float rndA = fract(sin(dot(ndc0, vec2(127.1, 311.7))) * 43758.5453123);
+  float rndB = fract(sin(dot(ndc0, vec2(269.5, 183.3))) * 43758.5453123);
+  float radial = clamp(length(ndc0), 0.0, 1.0);
+  float theta = atan(ndc0.y, ndc0.x);
+  float w = uTime * 0.42 + radial * 2.0 + rndA * 6.283;
+  float swirl = theta + 0.46 * sin(w) + 0.12 * sin(uTime * 0.9 + rndB * 6.283);
+  float baseR = radial * (0.66 + 0.12 * rndB);
+  float flowR = max(0.015, baseR + 0.05 * sin(w + rndA * 4.0));
+  vec2 flow = vec2(cos(swirl), sin(swirl)) * flowR;
+  vec2 tangent = vec2(-ndc0.y, ndc0.x);
+  vec2 advect = 0.12 * tangent * sin(w * 0.9 + rndB * 6.283) + 0.08 * ndc0 * cos(w * 0.7 + rndA * 6.283);
+  vec2 drift = 0.04 * vec2(
+    cos(w * 0.8 + rndA * 3.0),
+    sin(w * 0.7 + rndB * 4.0)
+  ) * (0.35 + 0.65 * (1.0 - radial));
+  float depthSeed = (rndA * 2.0 - 1.0) * (0.20 + 0.20 * z);
+  float zWave = 0.10 * sin(uTime * 0.75 + radial * 4.2 + rndB * 6.283);
+  vec2 cloudXY = ndc0 * 0.38 + flow * 0.25 + advect * 0.8 + drift * 0.8;
+  vec3 p = vec3(cloudXY, depthSeed + zWave);
+  float cam = 2.75;
+  float persp = cam / (cam - p.z);
+  persp = mix(1.0, persp, 0.22);
+  vec2 ndc = p.xy * 1.77 * persp;
+  vNdc = ndc;
+  gl_Position = vec4(ndc, 0.0, 1.0);
+  float depth01 = clamp((p.z + 1.3) / 2.6, 0.0, 1.0);
+  float pulse = 0.985 + 0.03 * sin(uTime * 0.95 + z * 8.0 + rndB * 6.283);
+  float vis = mix(0.20, 1.0, on);
+  gl_PointSize = mix(5.0, 14.0, depth01) * pulse * vis;
+  vec3 offBlue = vec3(0.78, 0.88, 0.98);
+  vec3 deepBlue = vec3(0.02, 0.16, 0.74);
+  vec3 lightBlue = vec3(0.11, 0.48, 0.98);
+  vec3 onCol = mix(deepBlue, lightBlue, 0.22 + 0.78*depth01) * (0.94 + 0.52*depth01);
+  vec3 col = mix(offBlue, onCol, on);
+  vCol = vec4(col, mix(0.09, 0.94, on));
+  vGlow = mix(0.34, 1.08, on) * (0.84 + 0.42*depth01);
+}`;
+    const fsWebgl1 = `
+precision highp float;
+varying vec4 vCol;
+varying float vGlow;
+varying vec2 vNdc;
+void main(){
+  vec2 uv = gl_PointCoord*2.0 - 1.0;
+  float d = dot(uv,uv);
+  float core = smoothstep(1.0, 0.28, d);
+  float rim = smoothstep(1.0, 0.86, d);
+  float a = core * rim * vCol.a;
+  gl_FragColor = vec4(vCol.rgb * (0.92 + 0.08 * core) * vGlow, a);
+}`;
+    const vs = glKind === "webgl2" ? vsWebgl2 : vsWebgl1
+    const fs = glKind === "webgl2" ? fsWebgl2 : fsWebgl1
     function compile(type, src){
       const s = gl.createShader(type)
       gl.shaderSource(s, src)
@@ -355,29 +439,58 @@ void main(){
     gl.linkProgram(prog)
     if(!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog) || "link")
 
-    const N = 24000
-    const seeds = new Float32Array(N*4)
-    for(let i=0;i<N;i++){
-      const u = Math.random()*2 - 1
-      const a = Math.random()*Math.PI*2
-      const s = Math.sqrt(1-u*u)
-      seeds[i*4+0] = s*Math.cos(a)
-      seeds[i*4+1] = u
-      seeds[i*4+2] = s*Math.sin(a)
-      seeds[i*4+3] = Math.random()
+    const pad = 16
+    const drawW = bgCanvas.width - pad * 2
+    const drawH = bgCanvas.height - pad * 2
+    const cellW = drawW / GRID
+    const cellH = drawH / GRID
+    const N = FRAME_BITS
+    const seeds = new Float32Array(N * 4)
+    let si = 0
+    for(let gy=0; gy<GRID; gy++){
+      for(let gx=0; gx<GRID; gx++){
+        const gridIdx = gy * GRID + gx
+        if(!CARRIER_MASK[gridIdx]) continue
+        const nx = (gx / (GRID - 1)) * 2 - 1
+        const ny = (gy / (GRID - 1)) * 2 - 1
+        const rr = nx * nx + ny * ny
+        const z = Math.sqrt(Math.max(0, 1.0 - rr))
+        seeds[si*4 + 0] = pad + (gx + 0.5) * cellW
+        seeds[si*4 + 1] = pad + (gy + 0.5) * cellH
+        seeds[si*4 + 2] = z
+        seeds[si*4 + 3] = 0
+        si++
+      }
     }
     const vbo = gl.createBuffer()
     gl.bindBuffer(gl.ARRAY_BUFFER, vbo)
-    gl.bufferData(gl.ARRAY_BUFFER, seeds, gl.STATIC_DRAW)
+    gl.bufferData(gl.ARRAY_BUFFER, seeds, gl.DYNAMIC_DRAW)
 
     gl.enable(gl.BLEND)
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE)
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
 
-    return { prog, vbo, N }
+    const attrLoc = glKind === "webgl2" ? 0 : gl.getAttribLocation(prog, "aSeed")
+    if(attrLoc < 0) throw new Error("attrib aSeed not found")
+    return { prog, vbo, N, seeds, attrLoc, lastBits: "" }
   }catch(e){
     setStatus(`WebGL init failed: ${e.message}`)
     return null
   }
+}
+
+function setGalaxyFrameBits(bits){
+  if(!gl || !galaxy || !bits) return
+  if(galaxy.lastBits === bits) return
+  const n = Math.min(galaxy.N, bits.length)
+  for(let i=0;i<n;i++){
+    galaxy.seeds[i*4 + 3] = bits[i] === "1" ? 1 : 0
+  }
+  for(let i=n;i<galaxy.N;i++){
+    galaxy.seeds[i*4 + 3] = 0
+  }
+  gl.bindBuffer(gl.ARRAY_BUFFER, galaxy.vbo)
+  gl.bufferSubData(gl.ARRAY_BUFFER, 0, galaxy.seeds)
+  galaxy.lastBits = bits
 }
 
 function renderGalaxy(t){
@@ -385,15 +498,29 @@ function renderGalaxy(t){
   if(!galaxy) galaxy = initGalaxy()
   if(!galaxy) return
   gl.viewport(0,0,bgCanvas.width,bgCanvas.height)
-  gl.clearColor(0,0,0,1)
+  gl.clearColor(1,1,1,1)
   gl.clear(gl.COLOR_BUFFER_BIT)
   gl.useProgram(galaxy.prog)
   gl.bindBuffer(gl.ARRAY_BUFFER, galaxy.vbo)
-  gl.enableVertexAttribArray(0)
-  gl.vertexAttribPointer(0, 4, gl.FLOAT, false, 0, 0)
+  gl.enableVertexAttribArray(galaxy.attrLoc)
+  gl.vertexAttribPointer(galaxy.attrLoc, 4, gl.FLOAT, false, 0, 0)
   gl.uniform1f(gl.getUniformLocation(galaxy.prog,"uTime"), t)
-  gl.uniform2f(gl.getUniformLocation(galaxy.prog,"uAspect"), bgCanvas.width, bgCanvas.height)
+  gl.uniform2f(gl.getUniformLocation(galaxy.prog,"uCanvas"), bgCanvas.width, bgCanvas.height)
   gl.drawArrays(gl.POINTS, 0, galaxy.N)
+}
+
+function clearBackgroundWhite(){
+  if(gl){
+    gl.viewport(0,0,bgCanvas.width,bgCanvas.height)
+    gl.clearColor(1,1,1,1)
+    gl.clear(gl.COLOR_BUFFER_BIT)
+    return
+  }
+  const b2 = bgCanvas.getContext("2d")
+  if(b2){
+    b2.fillStyle = "#ffffff"
+    b2.fillRect(0,0,bgCanvas.width,bgCanvas.height)
+  }
 }
 
 fileInputEl.addEventListener("change", () => {
@@ -401,6 +528,8 @@ fileInputEl.addEventListener("change", () => {
     encodeSelectedFile(fileInputEl.files[0])
   }
 })
+
+clearBackgroundWhite()
 
 function encode(){
 
@@ -865,8 +994,12 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
 
     let minMax=1e9, maxMax=-1e9
     let minMin=1e9, maxMin=-1e9
+    let minBlueMax=1e9, maxBlueMax=-1e9
+    let minBlueMin=1e9, maxBlueMin=-1e9
     const lumMax = new Float32Array(FRAME_BITS)
     const lumMin = new Float32Array(FRAME_BITS)
+    const blueMax = new Float32Array(FRAME_BITS)
+    const blueMin = new Float32Array(FRAME_BITS)
     let idx=0
     for(let y=0;y<GRID;y++){
       for(let x=0;x<GRID;x++){
@@ -878,6 +1011,8 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
         const py=Math.max(1,Math.min(h-2,Math.floor(p.y)))
         let Lmax = 0
         let Lmin = 1
+        let Bmax = 0
+        let Bmin = 1
         for(let oy=-1; oy<=1; oy++){
           for(let ox=-1; ox<=1; ox++){
             const sx = px + ox
@@ -885,31 +1020,52 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
             const ii=(sy*w+sx)*4
             const r=img[ii], g=img[ii+1], b=img[ii+2]
             const l=(0.2126*r + 0.7152*g + 0.0722*b)/255
+            // Blue-emphasis metric in [0..1]. Robust for dark-blue ON dots on white.
+            const bl = 0.5 + 0.5 * ((b - 0.5 * (r + g)) / 255)
             if(l > Lmax) Lmax = l
             if(l < Lmin) Lmin = l
+            if(bl > Bmax) Bmax = bl
+            if(bl < Bmin) Bmin = bl
           }
         }
         lumMax[idx] = Lmax
         lumMin[idx] = Lmin
+        blueMax[idx] = Bmax
+        blueMin[idx] = Bmin
         idx++
         if(Lmax<minMax) minMax=Lmax
         if(Lmax>maxMax) maxMax=Lmax
         if(Lmin<minMin) minMin=Lmin
         if(Lmin>maxMin) maxMin=Lmin
+        if(Bmax<minBlueMax) minBlueMax=Bmax
+        if(Bmax>maxBlueMax) maxBlueMax=Bmax
+        if(Bmin<minBlueMin) minBlueMin=Bmin
+        if(Bmin>maxBlueMin) maxBlueMin=Bmin
       }
     }
     const spanMax = maxMax - minMax
     const spanMin = maxMin - minMin
-    if(spanMax < 0.02 && spanMin < 0.02) return { match: -1, reason: "low-contrast", min:Math.min(minMax,minMin), max:Math.max(maxMax,maxMin), inset, orderIdx }
+    const spanBlueMax = maxBlueMax - minBlueMax
+    const spanBlueMin = maxBlueMin - minBlueMin
+    if(spanMax < 0.02 && spanMin < 0.02 && spanBlueMax < 0.02 && spanBlueMin < 0.02){
+      return {
+        match: -1,
+        reason: "low-contrast",
+        min: Math.min(minMax, minMin, minBlueMax, minBlueMin),
+        max: Math.max(maxMax, maxMin, maxBlueMax, maxBlueMin),
+        inset,
+        orderIdx
+      }
+    }
 
-    function scoreLuma(lum){
+    function scoreSignal(sig){
       const bins = 64
       const hist = new Uint32Array(bins)
-      for(let i=0;i<lum.length;i++){
-        const b = Math.max(0, Math.min(bins-1, (lum[i] * bins) | 0))
+      for(let i=0;i<sig.length;i++){
+        const b = Math.max(0, Math.min(bins-1, (sig[i] * bins) | 0))
         hist[b]++
       }
-      const total = lum.length
+      const total = sig.length
       let sum = 0
       for(let i=0;i<bins;i++) sum += i * hist[i]
       let sumB = 0
@@ -932,7 +1088,7 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
       let best = { match: -1, bits: "", raw: 0, inv: 0, useInv: false, thr: otsuThr }
       for(const thr of candidates){
         let bits=""
-        for(let i=0;i<lum.length;i++) bits += (lum[i] > thr) ? "1":"0"
+        for(let i=0;i<sig.length;i++) bits += (sig[i] > thr) ? "1":"0"
         let rawScore = 0
         for(let i=0;i<SYNC.length;i++) if(bits[i] === SYNC[i]) rawScore++
         const invScore = SYNC.length - rawScore
@@ -948,9 +1104,20 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
       return { best, bits, used: (best.useInv ? best.inv : best.raw) }
     }
 
-    const maxPath = scoreLuma(lumMax)
-    const minPath = scoreLuma(lumMin)
-    const chosen = (maxPath.used >= minPath.used) ? { ...maxPath, mode: "max", min:minMax, max:maxMax } : { ...minPath, mode: "min", min:minMin, max:maxMin }
+    const maxPath = scoreSignal(lumMax)
+    const minPath = scoreSignal(lumMin)
+    const blueMaxPath = scoreSignal(blueMax)
+    const blueMinPath = scoreSignal(blueMin)
+    const candidates = [
+      { ...maxPath, mode: "luma-max", min:minMax, max:maxMax },
+      { ...minPath, mode: "luma-min", min:minMin, max:maxMin },
+      { ...blueMaxPath, mode: "blue-max", min:minBlueMax, max:maxBlueMax },
+      { ...blueMinPath, mode: "blue-min", min:minBlueMin, max:maxBlueMin }
+    ]
+    let chosen = candidates[0]
+    for(let i=1;i<candidates.length;i++){
+      if(candidates[i].used > chosen.used) chosen = candidates[i]
+    }
     const used = chosen.used
     return {
       match: used,
@@ -1145,50 +1312,48 @@ function drawFinders(){
   drawCorner(x2 + rr, y2 + rr, "rgba(40,205,75,0.82)")
 }
 
-const TX_FRAME_HOLD = 30  // show each data frame for 30 refresh cycles (~0.5s at 60Hz) = 2 frames per second
-let txHoldCounter = 0
+const TX_FRAME_MS = 500  // show each data frame for 500ms (decoding window)
+let txNextFrameAtMs = 0
 
 function startTxLoop(){
   const runId = txRun
-  txHoldCounter = 0
+  txNextFrameAtMs = 0
   function loop(){
     if(runId !== txRun) return
 
-    ctx.fillStyle = "#ffffff"
-    ctx.fillRect(0,0,canvas.width,canvas.height)
+    const nowMs = performance.now()
+    // Freeze shader time: keep particle cloud look static for decodable frames.
+    renderGalaxy(0.0)
+    ctx.clearRect(0,0,canvas.width,canvas.height)
 
     drawFinders()
 
     if(txFountain){
-      if(txHoldCounter <= 0){
+      if(nowMs >= txNextFrameAtMs){
         frames[0] = txFountain.nextFrameBits()
         frameIndex = 0
-        txHoldCounter = TX_FRAME_HOLD
-      } else {
-        txHoldCounter--
+        txNextFrameAtMs = nowMs + TX_FRAME_MS
+        if(galaxy && frames.length) setGalaxyFrameBits(frames[frameIndex] || "")
+      }
+      if(galaxy && frames.length) setGalaxyFrameBits(frames[frameIndex] || "")
+    }
+    // WebGL unavailable fallback: keep transfer functional with 2D dots.
+    if(!gl || !galaxy){
+      ctx.globalCompositeOperation = "source-over"
+      const frame = frames[frameIndex] || ""
+      let bitIdx = 0
+      for(let i=0;i<particles.length;i++){
+        const p = particles[i]
+        if(!p.inside) continue
+        if(frame[bitIdx++] !== "1") continue
+        const r = 1.25 + 1.7*p.z
+        const a = 0.45 + 0.45*p.z
+        ctx.fillStyle = `rgba(10,60,190,${a})`
+        ctx.beginPath()
+        ctx.arc(p.x, p.y, r, 0, Math.PI * 2)
+        ctx.fill()
       }
     }
-    let frame=frames[frameIndex]||""
-
-    // Stable screen-space carrier microdots (decodable layer).
-    // Use normal blending on white background so dots stay visible.
-    ctx.globalCompositeOperation = "source-over"
-    let bitIdx = 0
-    for(let i=0;i<particles.length;i++){
-      const p = particles[i]
-      if(!p.inside) continue
-      const bit = frame[bitIdx++] === "1"
-      // We draw ONLY “on” dots; “off” is absence.
-      if(!bit) continue
-
-      const r = 1.25 + 1.7*p.z
-      const a = 0.45 + 0.45*p.z
-      ctx.fillStyle = `rgba(10,60,190,${a})`
-      ctx.beginPath()
-      ctx.arc(p.x, p.y, r, 0, Math.PI * 2)
-      ctx.fill()
-    }
-    ctx.globalCompositeOperation = "source-over"
 
     if(!txFountain){
       frameIndex=(frameIndex+1)%frames.length
