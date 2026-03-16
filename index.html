@@ -168,7 +168,7 @@ flex-wrap:wrap;
 
 <body>
 
-<h2>PartiCl v2.14</h2>
+<h2>PartiCl v2.15</h2>
 
 <input type="file" id="fileInput" style="display:none">
 
@@ -248,7 +248,7 @@ let decodeEstimatedTotal = null
 let decodeRecentTotals = []
 const MAX_TOTAL_ESTIMATE = 8192
 
-const GRID = 80 // reduced for easier decoding; fewer, larger cells
+const GRID = 56 // lower density (~half points): larger cells, more robust decode
 const CARRIER_RADIUS_SQ = 0.70
 const CARRIER_MASK = (() => {
   const m = new Uint8Array(GRID * GRID)
@@ -394,6 +394,14 @@ vec3 rotX(vec3 p, float a){ float c=cos(a), s=sin(a); return vec3(p.x, c*p.y - s
 void main(){
   float z = aSeed.z;
   float on = step(0.5, aSeed.w);
+  if(on < 0.5){
+    vNdc = vec2(2.0, 2.0);
+    vCol = vec4(0.0);
+    vGlow = 0.0;
+    gl_Position = vec4(2.0, 2.0, 0.0, 1.0);
+    gl_PointSize = 0.0;
+    return;
+  }
   vec2 ndc0 = vec2((aSeed.x / uCanvas.x) * 2.0 - 1.0, 1.0 - (aSeed.y / uCanvas.y) * 2.0);
   float rndA = fract(sin(dot(ndc0, vec2(127.1, 311.7))) * 43758.5453123);
   float rndB = fract(sin(dot(ndc0, vec2(269.5, 183.3))) * 43758.5453123);
@@ -422,15 +430,13 @@ void main(){
   gl_Position = vec4(ndc, 0.0, 1.0);
   float depth01 = clamp((p.z + 1.3) / 2.6, 0.0, 1.0);
   float pulse = 0.985 + 0.03 * sin(uTime * 0.95 + z * 8.0 + rndB * 6.283);
-  float vis = mix(0.20, 1.0, on);
-  gl_PointSize = mix(5.0, 14.0, depth01) * pulse * vis;
-  vec3 offBlue = vec3(0.78, 0.88, 0.98);
+  float vis = on;
+  gl_PointSize = mix(5.8, 15.8, depth01) * pulse * vis;
   vec3 deepBlue = vec3(0.02, 0.16, 0.74);
   vec3 lightBlue = vec3(0.11, 0.48, 0.98);
   vec3 onCol = mix(deepBlue, lightBlue, 0.22 + 0.78*depth01) * (0.94 + 0.52*depth01);
-  vec3 col = mix(offBlue, onCol, on);
-  vCol = vec4(col, mix(0.09, 0.94, on));
-  vGlow = mix(0.34, 1.08, on) * (0.84 + 0.42*depth01);
+  vCol = vec4(onCol, 0.94 * on);
+  vGlow = (1.08 * on) * (0.84 + 0.42*depth01);
 }`;
     const fsWebgl2 = `#version 300 es
 precision highp float;
@@ -459,6 +465,14 @@ vec3 rotX(vec3 p, float a){ float c=cos(a), s=sin(a); return vec3(p.x, c*p.y - s
 void main(){
   float z = aSeed.z;
   float on = step(0.5, aSeed.w);
+  if(on < 0.5){
+    vNdc = vec2(2.0, 2.0);
+    vCol = vec4(0.0);
+    vGlow = 0.0;
+    gl_Position = vec4(2.0, 2.0, 0.0, 1.0);
+    gl_PointSize = 0.0;
+    return;
+  }
   vec2 ndc0 = vec2((aSeed.x / uCanvas.x) * 2.0 - 1.0, 1.0 - (aSeed.y / uCanvas.y) * 2.0);
   float rndA = fract(sin(dot(ndc0, vec2(127.1, 311.7))) * 43758.5453123);
   float rndB = fract(sin(dot(ndc0, vec2(269.5, 183.3))) * 43758.5453123);
@@ -487,15 +501,13 @@ void main(){
   gl_Position = vec4(ndc, 0.0, 1.0);
   float depth01 = clamp((p.z + 1.3) / 2.6, 0.0, 1.0);
   float pulse = 0.985 + 0.03 * sin(uTime * 0.95 + z * 8.0 + rndB * 6.283);
-  float vis = mix(0.20, 1.0, on);
-  gl_PointSize = mix(5.0, 14.0, depth01) * pulse * vis;
-  vec3 offBlue = vec3(0.78, 0.88, 0.98);
+  float vis = on;
+  gl_PointSize = mix(5.8, 15.8, depth01) * pulse * vis;
   vec3 deepBlue = vec3(0.02, 0.16, 0.74);
   vec3 lightBlue = vec3(0.11, 0.48, 0.98);
   vec3 onCol = mix(deepBlue, lightBlue, 0.22 + 0.78*depth01) * (0.94 + 0.52*depth01);
-  vec3 col = mix(offBlue, onCol, on);
-  vCol = vec4(col, mix(0.09, 0.94, on));
-  vGlow = mix(0.34, 1.08, on) * (0.84 + 0.42*depth01);
+  vCol = vec4(onCol, 0.94 * on);
+  vGlow = (1.08 * on) * (0.84 + 0.42*depth01);
 }`;
     const fsWebgl1 = `
 precision highp float;
@@ -660,8 +672,10 @@ class FountainTx{
     this.meta = meta
     this.fileBytes = fileBytes
     this.fileId = (crypto && crypto.getRandomValues) ? crypto.getRandomValues(new Uint32Array(1))[0]>>>0 : ((Math.random()*2**32)>>>0)
-    const maxPayload = (FRAME_BITS - SYNC.length - TOTAL_CHUNKS_BITS * TOTAL_CHUNKS_REPEATS) / 8 - 30
-    this.chunkSize = Math.min(1024, Math.max(256, (maxPayload / 2) | 0))
+    // Conservative payload budget so one full droplet packet fits each frame.
+    // With lower point density we intentionally reduce throughput for robustness.
+    const maxPayload = Math.floor((FRAME_BITS - SYNC.length - TOTAL_CHUNKS_BITS * TOTAL_CHUNKS_REPEATS) / 8) - 30
+    this.chunkSize = Math.min(512, Math.max(96, maxPayload | 0))
     this.K = Math.ceil(fileBytes.length / this.chunkSize)
     this.chunks = new Array(this.K)
     for(let i=0;i<this.K;i++){
@@ -1697,6 +1711,10 @@ function decodeLoop(){
           const kData = bytesToU32LE(pkt, off); off += 4
           const _chunkSize = bytesToU16LE(pkt, off); off += 2
           const payloadLen = bytesToU16LE(pkt, off); off += 2
+          // Early estimate from droplet header K (less noisy than raw frame bits).
+          // Requires repeated agreement before it can become authoritative.
+          considerEstimatedTotal(kData)
+          considerTotalCandidate(kData, 3)
           const pktLen = off + payloadLen + 4
           if(pktLen <= pkt.length){
             const sliced = pkt.slice(0, pktLen)
@@ -1755,7 +1773,7 @@ function decodeLoop(){
       const name = rxFountain.meta ? rxFountain.meta.name : "file"
       setStatus("Receiving \"" + name + "\": " + prog.have + "/" + prog.need + " chunks (" + pct + "%).")
     }else{
-      setStatus(decodeFramesReceived === 0 ? "Aim at the particle cloud. Frames decoded: 0 / " + totalLabel() : "Locked signal. Frames decoded: " + decodeFramesReceived + " / " + totalLabel() + ". Waiting for file info…")
+      setStatus(decodeFramesReceived === 0 ? "Aim at the particle cloud. Frames decoded: 0 / " + totalLabel() : "Locked signal. Frames decoded: " + decodeFramesReceived + " / " + totalLabel() + ". Waiting for valid packets…")
       if(decodeProgressText) decodeProgressText.textContent = "Frames decoded: " + decodeFramesReceived + " / " + totalLabel() + (decodeFramesReceived === 0 ? " (no data yet – check alignment)" : "")
       if(decodeProgressBar) decodeProgressBar.style.width = Math.min(20, decodeFramesReceived * 2) + "%"
     }
