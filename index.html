@@ -168,7 +168,7 @@ flex-wrap:wrap;
 
 <body>
 
-<h2>PartiCl v2.20</h2>
+<h2>PartiCl v2.21</h2>
 
 <input type="file" id="fileInput" style="display:none">
 
@@ -356,12 +356,16 @@ function renderDecodeDebug(dbg){
     lines.push(`3) homography+sample: ${dbg.packet.ok ? "OK" : "FAIL"} (${dbg.packet.reason})`)
     lines.push(`   lum min/max/thr: ${fmt2(dbg.packet.minL)}/${fmt2(dbg.packet.maxL)}/${fmt2(dbg.packet.thr)}`)
     lines.push(`   best pose: inset=${dbg.packet.inset || 0} scale=${dbg.packet.scale || 1} order=${dbg.packet.order} mode=${dbg.packet.sampleMode || "?"} shift=${dbg.packet.bitShift || 0} off=${dbg.packet.byteOffset || 0}`)
+    lines.push(`   poses eval/strong: ${dbg.packet.posesEval || 0}/${dbg.packet.posesStrong || 0} | top=${dbg.packet.topSync} second=${dbg.packet.secondSync}`)
+    lines.push(`   align tries: ${dbg.packet.alignTries || 0}`)
     lines.push(`4) sync: raw=${dbg.packet.syncMatch}/64 inv=${dbg.packet.syncMatchInv}/64 used=${dbg.packet.syncUsed}`)
     lines.push(`5) packet bytes: ${dbg.packet.byteLen}`)
   } else {
     lines.push("3) homography+sample: not reached")
     lines.push("   lum min/max/thr: n/a/n/a/n/a")
     lines.push("   best pose: inset=- order=-")
+    lines.push("   poses eval/strong: 0/0 | top=- second=-")
+    lines.push("   align tries: 0")
     lines.push("4) sync: raw=-/64 inv=-/64 used=none")
     lines.push("5) packet bytes: 0")
   }
@@ -1071,7 +1075,12 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
       order: -1,
       scale: 1,
       bitShift: 0,
-      byteOffset: 0
+      byteOffset: 0,
+      posesEval: 0,
+      posesStrong: 0,
+      topSync: "-",
+      secondSync: "-",
+      alignTries: 0
     }
   }
   const base = [corners.tl, corners.tr, corners.br, corners.bl].map(p=>({x:p.x,y:p.y}))
@@ -1351,10 +1360,20 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
     .filter(p => p && p.bits && p.match >= 34)
     .sort((a, b) => (b.match || -1) - (a.match || -1))
     .slice(0, 24)
+  if(dbg && dbg.packet){
+    dbg.packet.posesEval = poses.length
+    dbg.packet.posesStrong = orderedPoses.length
+    const p0 = orderedPoses[0]
+    const p1 = orderedPoses[1]
+    dbg.packet.topSync = p0 ? `${p0.match}@${p0.sampleMode}/${p0.inset}/${p0.scale}` : "-"
+    dbg.packet.secondSync = p1 ? `${p1.match}@${p1.sampleMode}/${p1.inset}/${p1.scale}` : "-"
+  }
   let aligned = null
   let alignedPose = bestPose
+  let alignTries = 0
   for(const pose of orderedPoses){
     for(let shift=0; shift<8; shift++){
+      alignTries++
       aligned = tryPacketFromShift(pose.bits, shift)
       if(aligned){
         alignedPose = pose
@@ -1370,6 +1389,7 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
       dbg.packet.byteLen = 0
       dbg.packet.bitShift = 0
       dbg.packet.byteOffset = 0
+      dbg.packet.alignTries = alignTries
     }
     return { pkt: null, totalChunks }
   }
@@ -1381,6 +1401,7 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
     dbg.packet.byteLen = out.length
     dbg.packet.bitShift = aligned.shift
     dbg.packet.byteOffset = aligned.start
+    dbg.packet.alignTries = alignTries
     dbg.packet.inset = alignedPose.inset
     dbg.packet.scale = alignedPose.scale != null ? alignedPose.scale : dbg.packet.scale
     dbg.packet.order = alignedPose.orderIdx
