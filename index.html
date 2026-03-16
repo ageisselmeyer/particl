@@ -1261,10 +1261,12 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
   }
 
   let bestPose = null
+  const poses = []
   for(let oi=0; oi<orders.length; oi++){
     for(const inset of insetCandidates){
       for(const scale of scaleCandidates){
         const pose = evaluatePose(oi, inset, scale)
+        poses.push(pose)
         if(!bestPose || pose.match > bestPose.match) bestPose = pose
       }
     }
@@ -1288,9 +1290,9 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
   }
   const totalStart = SYNC.length
   const totalBlockLen = TOTAL_CHUNKS_BITS * TOTAL_CHUNKS_REPEATS
-  let totalChunks = 0
-  if(bestPose.bits && bestPose.bits.length >= totalStart + totalBlockLen){
-    const totalRepBits = bestPose.bits.slice(totalStart, totalStart + totalBlockLen)
+  function decodeTotalFromBits(bits){
+    if(!bits || bits.length < totalStart + totalBlockLen) return 0
+    const totalRepBits = bits.slice(totalStart, totalStart + totalBlockLen)
     let totalBits = ""
     for(let i=0;i<TOTAL_CHUNKS_BITS;i++){
       let ones = 0
@@ -1300,14 +1302,15 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
       }
       totalBits += (ones >= 2) ? "1" : "0"
     }
-    totalChunks = parseInt(totalBits, 2) >>> 0
+    return parseInt(totalBits, 2) >>> 0
   }
+  let totalChunks = decodeTotalFromBits(bestPose.bits)
   if(bestPose.match < 40){
     if(dbg && dbg.packet) dbg.packet.reason = bestPose.reason || "sync-too-low"
     return { pkt: null, totalChunks }
   }
-  const payloadBits = bestPose.bits.slice(totalStart + totalBlockLen)
-  function tryPacketFromShift(shift){
+  function tryPacketFromShift(bits, shift){
+    const payloadBits = bits.slice(totalStart + totalBlockLen)
     const bytes = bitsToBytes(payloadBits.slice(shift))
     if(bytes.length < 9) return null
     const m0 = MAGIC.charCodeAt(0), m1 = MAGIC.charCodeAt(1), m2 = MAGIC.charCodeAt(2), m3 = MAGIC.charCodeAt(3)
@@ -1344,9 +1347,20 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
     }
     return null
   }
+  const orderedPoses = poses
+    .filter(p => p && p.bits && p.match >= 34)
+    .sort((a, b) => (b.match || -1) - (a.match || -1))
+    .slice(0, 24)
   let aligned = null
-  for(let shift=0; shift<8; shift++){
-    aligned = tryPacketFromShift(shift)
+  let alignedPose = bestPose
+  for(const pose of orderedPoses){
+    for(let shift=0; shift<8; shift++){
+      aligned = tryPacketFromShift(pose.bits, shift)
+      if(aligned){
+        alignedPose = pose
+        break
+      }
+    }
     if(aligned) break
   }
   if(!aligned){
@@ -1360,12 +1374,17 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
     return { pkt: null, totalChunks }
   }
   const out = aligned.pkt
+  totalChunks = decodeTotalFromBits(alignedPose.bits)
   if(dbg && dbg.packet){
     dbg.packet.ok = true
     dbg.packet.reason = "ok"
     dbg.packet.byteLen = out.length
     dbg.packet.bitShift = aligned.shift
     dbg.packet.byteOffset = aligned.start
+    dbg.packet.inset = alignedPose.inset
+    dbg.packet.scale = alignedPose.scale != null ? alignedPose.scale : dbg.packet.scale
+    dbg.packet.order = alignedPose.orderIdx
+    dbg.packet.sampleMode = alignedPose.sampleMode || dbg.packet.sampleMode
   }
   return { pkt: out, totalChunks }
 }
