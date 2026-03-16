@@ -168,7 +168,7 @@ flex-wrap:wrap;
 
 <body>
 
-<h2>PartiCl v2.15</h2>
+<h2>PartiCl v2.16</h2>
 
 <input type="file" id="fileInput" style="display:none">
 
@@ -1683,12 +1683,7 @@ function decodeLoop(){
   }
 
   const frameDecoded = decodePacketFromFrame(img.data, sampSize, sampSize, corners, dbg)
-  if(frameDecoded && frameDecoded.totalChunks > 0){
-    // Always keep a rolling UI estimate so total does not remain "?" while locking.
-    considerEstimatedTotal(frameDecoded.totalChunks)
-    // Raw bit-level total can be noisy; keep only as low-confidence fallback.
-    considerTotalCandidate(frameDecoded.totalChunks, 8)
-  }
+  // Do not trust raw frame-level total bits for UI totals; they are too noisy.
   const pkt = frameDecoded ? frameDecoded.pkt : null
   const parseInfo = { ok: false, reason: "no-packet" }
   if(pkt){
@@ -1711,16 +1706,13 @@ function decodeLoop(){
           const kData = bytesToU32LE(pkt, off); off += 4
           const _chunkSize = bytesToU16LE(pkt, off); off += 2
           const payloadLen = bytesToU16LE(pkt, off); off += 2
-          // Early estimate from droplet header K (less noisy than raw frame bits).
-          // Requires repeated agreement before it can become authoritative.
-          considerEstimatedTotal(kData)
-          considerTotalCandidate(kData, 3)
           const pktLen = off + payloadLen + 4
           if(pktLen <= pkt.length){
             const sliced = pkt.slice(0, pktLen)
             const crc = bytesToU32LE(sliced, pktLen - 4)
             const calc = crc32(sliced.slice(0, pktLen - 4))
             if(calc === crc){
+              considerEstimatedTotal(kData)
               setTotalAuthoritative(kData)
             }else{
               parseInfo.reason += " crc-mismatch"
@@ -1738,10 +1730,10 @@ function decodeLoop(){
   }
   dbg.parse = parseInfo
   if(pkt && rxFountain){
-    decodeFramesReceived++
     const before = rxFountain.progress()
     rxFountain.ingestPacket(pkt)
     const prog = rxFountain.progress()
+    if(prog.have > before.have) decodeFramesReceived++
     if(prog.need > 0) considerTotalCandidate(prog.need, 1)
     dbg.ingest = `progress ${before.have}/${before.need} -> ${prog.have}/${prog.need}`
     if(prog.need > 0){
@@ -1767,14 +1759,14 @@ function decodeLoop(){
         }
       }
       if(decodeProgressText){
-        const counter = "Frames decoded: " + decodeFramesReceived + " / " + totalLabel()
+        const counter = "Chunks decoded: " + prog.have + " / " + totalLabel()
         decodeProgressText.textContent = timeRemain ? (counter + " (" + timeRemain + ")") : counter
       }
       const name = rxFountain.meta ? rxFountain.meta.name : "file"
       setStatus("Receiving \"" + name + "\": " + prog.have + "/" + prog.need + " chunks (" + pct + "%).")
     }else{
-      setStatus(decodeFramesReceived === 0 ? "Aim at the particle cloud. Frames decoded: 0 / " + totalLabel() : "Locked signal. Frames decoded: " + decodeFramesReceived + " / " + totalLabel() + ". Waiting for valid packets…")
-      if(decodeProgressText) decodeProgressText.textContent = "Frames decoded: " + decodeFramesReceived + " / " + totalLabel() + (decodeFramesReceived === 0 ? " (no data yet – check alignment)" : "")
+      setStatus(decodeFramesReceived === 0 ? "Aim at the particle cloud. Chunks decoded: 0 / " + totalLabel() : "Locked signal. Chunks decoded: " + decodeFramesReceived + " / " + totalLabel() + ". Waiting for valid packets…")
+      if(decodeProgressText) decodeProgressText.textContent = "Chunks decoded: " + decodeFramesReceived + " / " + totalLabel() + (decodeFramesReceived === 0 ? " (no data yet – check alignment)" : "")
       if(decodeProgressBar) decodeProgressBar.style.width = Math.min(20, decodeFramesReceived * 2) + "%"
     }
     if(rxFountain.isComplete()){
