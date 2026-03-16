@@ -168,7 +168,7 @@ flex-wrap:wrap;
 
 <body>
 
-<h2>PartiCl v2.17</h2>
+<h2>PartiCl v2.18</h2>
 
 <input type="file" id="fileInput" style="display:none">
 
@@ -675,7 +675,8 @@ class FountainTx{
     // Conservative payload budget so one full droplet packet fits each frame.
     // With lower point density we intentionally reduce throughput for robustness.
     const maxPayload = Math.floor((FRAME_BITS - SYNC.length - TOTAL_CHUNKS_BITS * TOTAL_CHUNKS_REPEATS) / 8) - 30
-    this.chunkSize = Math.min(512, Math.max(96, maxPayload | 0))
+    // Keep payload smaller than max to increase CRC pass probability on noisy channels.
+    this.chunkSize = Math.min(128, Math.max(96, maxPayload | 0))
     this.K = Math.ceil(fileBytes.length / this.chunkSize)
     this.chunks = new Array(this.K)
     for(let i=0;i<this.K;i++){
@@ -700,12 +701,11 @@ class FountainTx{
 
   _degree(rng){
     const r = (rng()>>>0) / 0xFFFFFFFF
-    if(r < 0.25) return 1
-    if(r < 0.55) return 2
-    if(r < 0.75) return 3
-    if(r < 0.88) return 4
-    if(r < 0.95) return 6
-    return Math.min(this.K, 10)
+    // Robust-first profile: favor degree-1 so each valid droplet is likely to decode a chunk.
+    if(r < 0.68) return 1
+    if(r < 0.88) return 2
+    if(r < 0.97) return 3
+    return Math.min(this.K, 4)
   }
 
   _crc32(u8){
@@ -1712,7 +1712,17 @@ function decodeLoop(){
   }
 
   const frameDecoded = decodePacketFromFrame(img.data, sampSize, sampSize, corners, dbg)
-  // Do not trust raw frame-level total bits for UI totals; they are too noisy.
+  // Use raw frame-level total only as early UI estimate when sync confidence is strong.
+  // Authoritative locking still comes from valid packet parsing below.
+  if(
+    frameDecoded &&
+    frameDecoded.totalChunks > 0 &&
+    frameDecoded.totalChunks <= MAX_TOTAL_ESTIMATE &&
+    dbg.packet &&
+    dbg.packet.syncMatch >= 50
+  ){
+    considerEstimatedTotal(frameDecoded.totalChunks)
+  }
   const pkt = frameDecoded ? frameDecoded.pkt : null
   const parseInfo = { ok: false, reason: "no-packet" }
   if(pkt){
