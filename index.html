@@ -168,7 +168,7 @@ flex-wrap:wrap;
 
 <body>
 
-<h2>PartiCl v2.16</h2>
+<h2>PartiCl v2.17</h2>
 
 <input type="file" id="fileInput" style="display:none">
 
@@ -1235,19 +1235,29 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
     const blueMaxPath = scoreSignal(blueMax)
     const blueMinPath = scoreSignal(blueMin)
     const candidates = [
-      { ...maxPath, mode: "luma-max", min:minMax, max:maxMax },
-      { ...minPath, mode: "luma-min", min:minMin, max:maxMin },
-      { ...blueMaxPath, mode: "blue-max", min:minBlueMax, max:maxBlueMax },
-      { ...blueMinPath, mode: "blue-min", min:minBlueMin, max:maxBlueMin }
+      { ...maxPath, mode: "luma-max", min:minMax, max:maxMax, span:spanMax, pref:1 },
+      { ...minPath, mode: "luma-min", min:minMin, max:maxMin, span:spanMin, pref:1 },
+      { ...blueMaxPath, mode: "blue-max", min:minBlueMax, max:maxBlueMax, span:spanBlueMax, pref:2 },
+      { ...blueMinPath, mode: "blue-min", min:minBlueMin, max:maxBlueMin, span:spanBlueMin, pref:2 }
     ]
     let chosen = candidates[0]
     for(let i=1;i<candidates.length;i++){
-      if(candidates[i].used > chosen.used) chosen = candidates[i]
+      const c = candidates[i]
+      if(c.used > chosen.used){
+        chosen = c
+      }else if(c.used === chosen.used){
+        if((c.span || 0) > (chosen.span || 0)){
+          chosen = c
+        }else if((c.span || 0) === (chosen.span || 0) && (c.pref || 0) > (chosen.pref || 0)){
+          chosen = c
+        }
+      }
     }
     const used = chosen.used
+    const SYNC_SOFT_MIN = 42
     return {
       match: used,
-      reason: used >= 46 ? "ok" : "sync-too-low",
+      reason: used >= 46 ? "ok" : (used >= SYNC_SOFT_MIN ? "sync-weak" : "sync-too-low"),
       bits: chosen.bits,
       min: chosen.min,
       max: chosen.max,
@@ -1316,14 +1326,15 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
     }
     totalChunks = parseInt(totalBits, 2) >>> 0
   }
-  if(bestPose.match < 46){
+  const SYNC_SOFT_MIN = 42
+  if(bestPose.match < SYNC_SOFT_MIN){
     if(dbg && dbg.packet) dbg.packet.reason = bestPose.reason || "sync-too-low"
     return { pkt: null, totalChunks }
   }
   const out = bitsToBytes(bestPose.bits.slice(totalStart + totalBlockLen))
   if(dbg && dbg.packet){
     dbg.packet.ok = true
-    dbg.packet.reason = "ok"
+    dbg.packet.reason = bestPose.match >= 46 ? "ok" : "sync-weak"
     dbg.packet.byteLen = out.length
   }
   return { pkt: out, totalChunks }
@@ -1792,7 +1803,7 @@ function decodeLoop(){
     }
   }
   dbg.parse = parseInfo
-  if(pkt && rxFountain){
+  if(pkt && rxFountain && parseInfo.ok){
     decodeFramesReceived++
     const before = rxFountain.progress()
     rxFountain.ingestPacket(pkt)
