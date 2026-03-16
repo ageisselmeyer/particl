@@ -115,13 +115,14 @@ font-size:18px;
 }
 
 #decodeProgressWrap{ text-align:left; }
-#decodeProgressText{ min-height:1.2em; text-align:center; }
+#decodeProgressText{ min-height:1.2em; text-align:center; font-size:16px !important; }
+#status{ font-size:13px; }
 </style>
 </head>
 
 <body>
 
-<h2>PartiCl v2.04</h2>
+<h2>PartiCl v2.05</h2>
 
 <input type="file" id="fileInput" style="display:none">
 
@@ -215,6 +216,7 @@ const CARRIER_MASK = (() => {
 })()
 const FRAME_BITS = CARRIER_MASK.reduce((a, b) => a + b, 0)
 const SYNC = "1100110011110000101010101100110011001100111100001010101011001100" // 64-bit sync marker
+const TOTAL_CHUNKS_BITS = 32 // fixed total-chunks field on every frame
 const MAGIC = "VTX2" // 4 bytes (32 bits)
 const FILE_ID = (crypto && crypto.getRandomValues) ? crypto.getRandomValues(new Uint32Array(1))[0] >>> 0 : ((Math.random()*2**32)>>>0)
 
@@ -481,7 +483,7 @@ class FountainTx{
     this.meta = meta
     this.fileBytes = fileBytes
     this.fileId = (crypto && crypto.getRandomValues) ? crypto.getRandomValues(new Uint32Array(1))[0]>>>0 : ((Math.random()*2**32)>>>0)
-    const maxPayload = (FRAME_BITS - SYNC.length) / 8 - 30
+    const maxPayload = (FRAME_BITS - SYNC.length - TOTAL_CHUNKS_BITS) / 8 - 30
     this.chunkSize = Math.min(1024, Math.max(256, (maxPayload / 2) | 0))
     this.K = Math.ceil(fileBytes.length / this.chunkSize)
     this.chunks = new Array(this.K)
@@ -576,12 +578,13 @@ class FountainTx{
     }
     this.seq++
     const payloadBits = bytesToBits(pkt)
-    const needed = FRAME_BITS - SYNC.length
+    const needed = FRAME_BITS - SYNC.length - TOTAL_CHUNKS_BITS
     // Fill to full frame by repeating payload (not zero-pad) so the whole circle shows dots
     let clipped = payloadBits
     while (clipped.length < needed) clipped += payloadBits.slice(0, needed - clipped.length)
     clipped = clipped.slice(0, needed)
-    return (SYNC + clipped).padEnd(FRAME_BITS, "0").slice(0, FRAME_BITS)
+    const totalBits = (this.K >>> 0).toString(2).padStart(TOTAL_CHUNKS_BITS, "0")
+    return (SYNC + totalBits + clipped).padEnd(FRAME_BITS, "0").slice(0, FRAME_BITS)
   }
 }
 
@@ -1010,13 +1013,15 @@ function decodePacketFromFrame(img, w, h, corners, dbg){
     if(dbg && dbg.packet) dbg.packet.reason = bestPose.reason || "sync-too-low"
     return null
   }
-  const out = bitsToBytes(bestPose.bits.slice(SYNC.length))
+  const totalBits = bestPose.bits.slice(SYNC.length, SYNC.length + TOTAL_CHUNKS_BITS)
+  const totalChunks = parseInt(totalBits, 2) >>> 0
+  const out = bitsToBytes(bestPose.bits.slice(SYNC.length + TOTAL_CHUNKS_BITS))
   if(dbg && dbg.packet){
     dbg.packet.ok = true
     dbg.packet.reason = "ok"
     dbg.packet.byteLen = out.length
   }
-  return out
+  return { pkt: out, totalChunks }
 }
 
 function buildFramesFromPackets(){
@@ -1383,7 +1388,11 @@ function decodeLoop(){
     bl: {x: cornersSmall.bl.x*scale, y: cornersSmall.bl.y*scale},
   }
 
-  const pkt = decodePacketFromFrame(img.data, sampSize, sampSize, corners, dbg)
+  const frameDecoded = decodePacketFromFrame(img.data, sampSize, sampSize, corners, dbg)
+  if(frameDecoded && frameDecoded.totalChunks > 0 && frameDecoded.totalChunks <= 200000){
+    decodeExpectedTotal = frameDecoded.totalChunks
+  }
+  const pkt = frameDecoded ? frameDecoded.pkt : null
   const parseInfo = { ok: false, reason: "no-packet" }
   if(pkt){
     if(pkt.length < 9){
