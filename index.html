@@ -168,7 +168,7 @@ flex-wrap:wrap;
 
 <body>
 
-<h2>PartiCl v2.21</h2>
+<h2>PartiCl v2.22</h2>
 
 <input type="file" id="fileInput" style="display:none">
 
@@ -410,21 +410,11 @@ void main(){
   float rndA = fract(sin(dot(ndc0, vec2(127.1, 311.7))) * 43758.5453123);
   float rndB = fract(sin(dot(ndc0, vec2(269.5, 183.3))) * 43758.5453123);
   float radial = clamp(length(ndc0), 0.0, 1.0);
-  float theta = atan(ndc0.y, ndc0.x);
-  float w = uTime * 0.42 + radial * 2.0 + rndA * 6.283;
-  float swirl = theta + 0.46 * sin(w) + 0.12 * sin(uTime * 0.9 + rndB * 6.283);
-  float baseR = radial * (0.66 + 0.12 * rndB);
-  float flowR = max(0.015, baseR + 0.05 * sin(w + rndA * 4.0));
-  vec2 flow = vec2(cos(swirl), sin(swirl)) * flowR;
-  vec2 tangent = vec2(-ndc0.y, ndc0.x);
-  vec2 advect = 0.12 * tangent * sin(w * 0.9 + rndB * 6.283) + 0.08 * ndc0 * cos(w * 0.7 + rndA * 6.283);
-  vec2 drift = 0.04 * vec2(
-    cos(w * 0.8 + rndA * 3.0),
-    sin(w * 0.7 + rndB * 4.0)
-  ) * (0.35 + 0.65 * (1.0 - radial));
-  float depthSeed = (rndA * 2.0 - 1.0) * (0.20 + 0.20 * z);
-  float zWave = 0.10 * sin(uTime * 0.75 + radial * 4.2 + rndB * 6.283);
-  vec2 cloudXY = ndc0 * 0.38 + flow * 0.25 + advect * 0.8 + drift * 0.8;
+  // Keep carrier positions close to a linear grid mapping for decoder robustness.
+  // 3D look comes from depth/size/color, not large XY warping.
+  float depthSeed = (rndA * 2.0 - 1.0) * (0.18 + 0.14 * z);
+  float zWave = 0.02 * sin(uTime * 0.40 + radial * 4.2 + rndB * 6.283);
+  vec2 cloudXY = ndc0 * 0.38;
   vec3 p = vec3(cloudXY, depthSeed + zWave);
   float cam = 2.75;
   float persp = cam / (cam - p.z);
@@ -481,21 +471,9 @@ void main(){
   float rndA = fract(sin(dot(ndc0, vec2(127.1, 311.7))) * 43758.5453123);
   float rndB = fract(sin(dot(ndc0, vec2(269.5, 183.3))) * 43758.5453123);
   float radial = clamp(length(ndc0), 0.0, 1.0);
-  float theta = atan(ndc0.y, ndc0.x);
-  float w = uTime * 0.42 + radial * 2.0 + rndA * 6.283;
-  float swirl = theta + 0.46 * sin(w) + 0.12 * sin(uTime * 0.9 + rndB * 6.283);
-  float baseR = radial * (0.66 + 0.12 * rndB);
-  float flowR = max(0.015, baseR + 0.05 * sin(w + rndA * 4.0));
-  vec2 flow = vec2(cos(swirl), sin(swirl)) * flowR;
-  vec2 tangent = vec2(-ndc0.y, ndc0.x);
-  vec2 advect = 0.12 * tangent * sin(w * 0.9 + rndB * 6.283) + 0.08 * ndc0 * cos(w * 0.7 + rndA * 6.283);
-  vec2 drift = 0.04 * vec2(
-    cos(w * 0.8 + rndA * 3.0),
-    sin(w * 0.7 + rndB * 4.0)
-  ) * (0.35 + 0.65 * (1.0 - radial));
-  float depthSeed = (rndA * 2.0 - 1.0) * (0.20 + 0.20 * z);
-  float zWave = 0.10 * sin(uTime * 0.75 + radial * 4.2 + rndB * 6.283);
-  vec2 cloudXY = ndc0 * 0.38 + flow * 0.25 + advect * 0.8 + drift * 0.8;
+  float depthSeed = (rndA * 2.0 - 1.0) * (0.18 + 0.14 * z);
+  float zWave = 0.02 * sin(uTime * 0.40 + radial * 4.2 + rndB * 6.283);
+  vec2 cloudXY = ndc0 * 0.38;
   vec3 p = vec3(cloudXY, depthSeed + zWave);
   float cam = 2.75;
   float persp = cam / (cam - p.z);
