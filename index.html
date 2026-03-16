@@ -168,7 +168,7 @@ flex-wrap:wrap;
 
 <body>
 
-<h2>PartiCl v2.11</h2>
+<h2>PartiCl v2.12</h2>
 
 <input type="file" id="fileInput" style="display:none">
 
@@ -292,6 +292,19 @@ function considerTotalCandidate(k, minVotes = 2){
   const n = (decodeTotalVotes.get(kk) || 0) + 1
   decodeTotalVotes.set(kk, n)
   if(n >= minVotes) decodeExpectedTotal = kk
+}
+
+function bestTotalVoteCandidate(minVotes = 1){
+  let bestK = null
+  let bestN = 0
+  for(const [k, n] of decodeTotalVotes.entries()){
+    if(n < minVotes) continue
+    if(n > bestN){
+      bestN = n
+      bestK = k
+    }
+  }
+  return bestK
 }
 
 function renderDecodeDebug(dbg){
@@ -630,7 +643,6 @@ class FountainTx{
       this.chunks[i]=c
     }
     this.seq = 0
-    this.metaEvery = 8
   }
 
   _rng(seed){
@@ -705,12 +717,9 @@ class FountainTx{
   }
 
   nextFrameBits(){
-    let pkt
-    if((this.seq % this.metaEvery) === 0){
-      pkt = this._buildMetaPacket()
-    }else{
-      pkt = this._buildDropletPacket()
-    }
+    // No dedicated meta packets: every transmitted frame carries data droplets.
+    // Total chunk count (K) is embedded in every frame via totalRep bits below.
+    const pkt = this._buildDropletPacket()
     this.seq++
     const payloadBits = bytesToBits(pkt)
     const needed = FRAME_BITS - SYNC.length - TOTAL_CHUNKS_BITS * TOTAL_CHUNKS_REPEATS
@@ -862,7 +871,7 @@ class FountainRx{
     return { have: this.solved, need: this.K }
   }
   isComplete(){
-    return this.K != null && this.totalSize != null && this.solved >= this.K
+    return this.K != null && this.chunkSize != null && this.solved >= this.K
   }
   buildFile(){
     if(!this.isComplete()) return null
@@ -870,7 +879,8 @@ class FountainRx{
     for(let i=0;i<this.K;i++){
       merged.set(this.chunks[i] || new Uint8Array(this.chunkSize), i*this.chunkSize)
     }
-    return merged.slice(0, this.totalSize)
+    const finalSize = (this.totalSize != null) ? this.totalSize : (this.K * this.chunkSize)
+    return merged.slice(0, finalSize)
   }
 }
 
@@ -1524,6 +1534,8 @@ function decodeLoop(){
   const totalLabel = () => {
     if(decodeExpectedTotal != null && decodeExpectedTotal > 0 && decodeExpectedTotal <= 200000) return String(decodeExpectedTotal)
     if(rxFountain && rxFountain.K != null && rxFountain.K > 0 && rxFountain.K <= 200000) return String(rxFountain.K)
+    const voted = bestTotalVoteCandidate(1)
+    if(voted != null) return "~" + String(voted)
     return "?"
   }
   const vw = video.videoWidth || 0
@@ -1628,8 +1640,8 @@ function decodeLoop(){
 
   const frameDecoded = decodePacketFromFrame(img.data, sampSize, sampSize, corners, dbg)
   if(frameDecoded && frameDecoded.totalChunks > 0){
-    // Bit-level total is noisy; require repeated agreement.
-    considerTotalCandidate(frameDecoded.totalChunks, 3)
+    // Total is encoded redundantly in every frame; decode immediately.
+    considerTotalCandidate(frameDecoded.totalChunks, 1)
   }
   const pkt = frameDecoded ? frameDecoded.pkt : null
   const parseInfo = { ok: false, reason: "no-packet" }
@@ -1706,7 +1718,8 @@ function decodeLoop(){
       link.style.display = "block"
       if(decodeProgressBar) decodeProgressBar.style.width = "100%"
       if(decodeProgressText) decodeProgressText.textContent = "Done"
-      setStatus(`Recovered “${link.download}” (${bytes.length} bytes). You can download it now.`)
+      const sizeNote = (rxFountain.totalSize == null) ? " (estimated size; metadata missing)" : ""
+      setStatus(`Recovered “${link.download}” (${bytes.length} bytes)${sizeNote}. You can download it now.`)
       if(window.confirm(`Transfer complete. Download "${link.download}" now?`)){
         link.click()
       }
