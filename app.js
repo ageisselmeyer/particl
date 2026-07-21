@@ -254,6 +254,43 @@ function bitsToBytes(bits){
   return out
 }
 
+// Fill the full square: block-repeat payload bits across all DATA_COUNT cells.
+function expandBits(payload, n){
+  const L = payload.length
+  if(L <= 0) return "0".repeat(n)
+  if(L >= n) return payload.slice(0, n)
+  const rep = (n / L) | 0
+  const extra = n - rep * L
+  let out = ""
+  for(let i = 0; i < L; i++){
+    const copies = rep + (i < extra ? 1 : 0)
+    const bit = payload[i]
+    for(let c = 0; c < copies; c++) out += bit
+  }
+  return out
+}
+
+function collapseVals(vals, targetLen){
+  const n = vals.length
+  const L = targetLen
+  if(L >= n){
+    const out = new Float32Array(L)
+    out.set(vals.length >= L ? vals.subarray(0, L) : vals)
+    return out
+  }
+  const rep = (n / L) | 0
+  const extra = n - rep * L
+  const out = new Float32Array(L)
+  let idx = 0
+  for(let i = 0; i < L; i++){
+    const copies = rep + (i < extra ? 1 : 0)
+    let s = 0
+    for(let c = 0; c < copies; c++) s += vals[idx++]
+    out[i] = s / copies
+  }
+  return out
+}
+
 function utf8ToB64(str){
   return btoa(unescape(encodeURIComponent(str || "")))
 }
@@ -679,14 +716,13 @@ function buildFrames(fileBytes, fileMeta){
     body[3] = crc & 255
     body.set(raw, 4)
 
-    let bits = SYNC + bytesToBits(body)
-    if(bits.length > DATA_COUNT){
-      console.warn(`Packet ${pi} needs ${bits.length} bits but frame holds ${DATA_COUNT}; truncating`)
-      bits = bits.slice(0, DATA_COUNT)
+    const payloadBits = SYNC + bytesToBits(body)
+    if(payloadBits.length > DATA_COUNT){
+      console.warn(`Packet ${pi} needs ${payloadBits.length} bits but frame holds ${DATA_COUNT}; truncating`)
+      out.push(payloadBits.slice(0, DATA_COUNT))
     }else{
-      bits = bits.padEnd(DATA_COUNT, "0")
+      out.push(expandBits(payloadBits, DATA_COUNT))
     }
-    out.push(bits)
   }
   out._fountain = { k, r, copies: FOUNTAIN_SOURCE_COPIES, total: packets.length }
   return out
@@ -1009,6 +1045,81 @@ function bitsFromAccum(accum, frames){
   return bitsFromVals(vals)
 }
 
+// Frames are stretch-filled across the grid — collapse to each candidate packet length.
+function valsToPayload(vals){
+  if(!vals || vals.length < SYNC.length + 40) return null
+  const maxBody = Math.min(520, ((vals.length - SYNC.length) / 8) | 0)
+  const minBody = 5
+  const bodies = []
+  for(let bb = minBody; bb <= maxBody; bb++) bodies.push(bb)
+  bodies.sort((a, b) => {
+    const da = Math.min(Math.abs(a - 47), Math.abs(a - 82))
+    const db = Math.min(Math.abs(b - 47), Math.abs(b - 82))
+    return da - db || a - b
+  })
+
+  let bestOk = 0
+  let triedLens = 0
+  let bestBits = null
+  let bestConf = null
+
+  for(const bb of bodies){
+    const L = SYNC.length + bb * 8
+    const cvals = collapseVals(vals, L)
+    const r = thresholdVals(cvals)
+    if(r.sync > bestOk){
+      bestOk = r.sync
+      bestBits = r.bits
+      bestConf = r.conf
+      decodeDbg.mean = r.mean
+      decodeDbg.std = r.std
+    }
+    if(r.sync < 26) continue
+    triedLens++
+    const hit = decodeBodyText(r.bits.slice(SYNC.length), `fill@${L}(${r.sync}/32)`)
+    if(hit.text){
+      decodeDbg.sync = r.sync
+      decodeDbg.crc = "ok"
+      decodeDbg.last = `${hit.startLabel} ${hit.text.slice(0, 24)}…`
+      bitsFromVals._conf = r.conf
+      bitsFromVals._vals = cvals
+      return hit.text
+    }
+  }
+
+  decodeDbg.sync = bestOk
+  if(bestOk < 20){
+    decodeDbg.crc = "no-sync"
+    decodeDbg.last = `no SYNC (best ${bestOk}/32)`
+    return null
+  }
+
+  if(bestBits && bestConf && bestOk >= 24){
+    const amb = []
+    for(let i = SYNC.length; i < bestBits.length; i++) amb.push({ i, c: bestConf[i] ?? 1e9 })
+    amb.sort((a, b) => a.c - b.c)
+    const top = amb.slice(0, 8).map(x => x.i)
+    const flipAt = (src, idx) => {
+      const arr = src.split("")
+      arr[idx] = arr[idx] === "1" ? "0" : "1"
+      return arr.join("")
+    }
+    for(const idx of top){
+      const hit = decodeBodyText(flipAt(bestBits, idx).slice(SYNC.length), `flip1@${idx}`)
+      triedLens += hit.tried
+      if(hit.text){
+        decodeDbg.crc = "ok"
+        decodeDbg.last = `${hit.startLabel} ${hit.text.slice(0, 24)}…`
+        return hit.text
+      }
+    }
+  }
+
+  decodeDbg.crc = "fail"
+  decodeDbg.last = `best SYNC ${bestOk}/32 · CRC miss (${triedLens} lens)`
+  return null
+}
+
 function updateLockOverlay(quad, meta){
   if(!lockQuadEl || !videoWrap || !quad || !meta) return
   const wrapW = videoWrap.clientWidth
@@ -1109,8 +1220,8 @@ function sampleCloudBitsFromVideo(){
   }
 
   const bestVals = sampleVals()
-  const bestBits = bitsFromVals(bestVals)
-  const bestScore = syncScoreAt(bestBits, 0)
+  bitsFromVals(bestVals)
+  const bestScore = decodeDbg.sync || 0
 
   if(!decodeBitAccum) decodeBitAccum = new Float32Array(DATA_COUNT)
   for(let i = 0; i < DATA_COUNT; i++) decodeBitAccum[i] += bestVals[i]
@@ -1124,8 +1235,12 @@ function sampleCloudBitsFromVideo(){
   sampleCloudBitsFromVideo._meta = { quad: useQuad, aligned: !!quad }
 
   if(decodeBitFrames < DECODE_ACCUM_MIN) return null
-  if(bestScore >= 28 && bestBits && decodeAlignLocked) return bestBits
-  return bitsFromAccum(decodeBitAccum, decodeBitFrames)
+  // Return raw ink samples — valsToPayload collapses the full-square stretch.
+  if(bestScore >= 18 && decodeAlignLocked) return bestVals
+  const accumVals = new Float32Array(DATA_COUNT)
+  for(let i = 0; i < DATA_COUNT; i++) accumVals[i] = decodeBitAccum[i] / decodeBitFrames
+  decodeDbg.accum = decodeBitFrames
+  return accumVals
 }
 
 function resetDecodeAccum(){
@@ -1688,11 +1803,11 @@ async function decodeLoop(){
   updateDecodeMeters()
   updateDecodeDebug()
 
-  // Primary: sample cloud bits
+  // Primary: sample full-square ink grid (packets are stretch-filled)
   if(video.videoWidth){
-    const bits = sampleCloudBitsFromVideo()
-    if(bits){
-      const text = bitsToPayload(bits)
+    const vals = sampleCloudBitsFromVideo()
+    if(vals){
+      const text = valsToPayload(vals)
       if(text && ingestPayloadText(text)){
         rxPayloadOk = true
         resetDecodeAccum()
