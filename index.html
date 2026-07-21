@@ -106,7 +106,7 @@
         wrap.style.background = "#fff";
       }
       if(!c || typeof qrcode !== "function") return false;
-      var qr = qrcode(0, "M");
+      var qr = qrcode(0, "Q");
       qr.addData(String(text || "PartiCl"), "Byte");
       qr.make();
       var n = qr.getModuleCount();
