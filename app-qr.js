@@ -241,10 +241,10 @@ function getJsQR(){
     : null
 }
 
-const CLOUD_PIXEL = 900
-const PARTICLES_ON = 11
-const PARTICLES_FINDER = 18
-const PARTICLES_OFF = 0.04 // sparse ambient dust in empty modules
+const CLOUD_PIXEL = 1024
+const PARTICLES_ON = 5
+const PARTICLES_FINDER = 9
+const PARTICLES_OFF = 0.02 // sparse ambient dust in empty modules
 
 let cloudParticles = null
 let cloudMeta = null // { n, margin }
@@ -272,8 +272,7 @@ function buildQrMatrix(text){
 
 /**
  * Watch-pairing style: the QR *is* a cloud of blue particles.
- * Dark modules → dense luminous dots; finders denser; empty cells almost vacant.
- * Camera still reads it as an inverted/high-contrast QR (jsQR attemptBoth).
+ * Keep modules sparse enough that the field stays dark (not a washed-out white square).
  */
 function spawnCloudFromText(text){
   const qr = buildQrMatrix(text)
@@ -289,22 +288,21 @@ function spawnCloudFromText(text){
       for(let i = 0; i < count; i++){
         const u = hash01local(r * 131 + c, i * 17 + 3)
         const v = hash01local(c * 97 + r, i * 29 + 11)
-        // Gaussian-ish jitter inside the module
-        const ox = (u - 0.5) * (on ? 0.62 : 0.9)
-        const oy = (v - 0.5) * (on ? 0.62 : 0.9)
+        const ox = (u - 0.5) * (on ? 0.45 : 0.8)
+        const oy = (v - 0.5) * (on ? 0.45 : 0.8)
         particles.push({
           r, c, on, finder,
           ox, oy,
           phase: u * Math.PI * 2,
-          spin: 0.6 + v * 1.4,
-          size: on ? (finder ? 1.15 : 0.85 + u * 0.35) : 0.35,
-          bright: on ? (finder ? 1 : 0.72 + v * 0.25) : 0.06 + u * 0.05
+          spin: 0.5 + v * 1.1,
+          size: on ? (finder ? 0.95 : 0.65 + u * 0.25) : 0.28,
+          bright: on ? (finder ? 0.9 : 0.55 + v * 0.2) : 0.05
         })
       }
     }
   }
   cloudParticles = particles
-  cloudMeta = { n, margin: 0.11 }
+  cloudMeta = { n, margin: 0.12 }
   cloudAnimT0 = performance.now()
   return { n, particles }
 }
@@ -312,64 +310,81 @@ function spawnCloudFromText(text){
 function ensureCloudCanvas(){
   if(!cloudCanvas) throw new Error("cloud canvas missing")
   cloudCanvas.hidden = false
-  const dpr = Math.min(2, window.devicePixelRatio || 1)
-  const css = cloudCanvas.clientWidth || CLOUD_PIXEL
-  const px = Math.round(css * dpr)
-  if(cloudCanvas.width !== px || cloudCanvas.height !== px){
-    cloudCanvas.width = px
-    cloudCanvas.height = px
+  // Fixed backing store — don't depend on clientWidth (0 during early layout → blank white canvas)
+  if(cloudCanvas.width !== CLOUD_PIXEL || cloudCanvas.height !== CLOUD_PIXEL){
+    cloudCanvas.width = CLOUD_PIXEL
+    cloudCanvas.height = CLOUD_PIXEL
   }
-  return cloudCanvas.getContext("2d")
+  return cloudCanvas.getContext("2d", { alpha: false })
 }
 
 function paintParticleCloud(now){
-  if(!cloudParticles || !cloudMeta) return
   const ctx = ensureCloudCanvas()
   const W = cloudCanvas.width
+
+  // Always paint black first so a failed spawn never leaves a white bitmap
+  ctx.globalCompositeOperation = "source-over"
+  ctx.fillStyle = "#000000"
+  ctx.fillRect(0, 0, W, W)
+
+  if(!cloudParticles || !cloudMeta) return
+
   const { n, margin } = cloudMeta
   const t = ((now || performance.now()) - cloudAnimT0) * 0.001
 
-  // Deep space background
-  const bg = ctx.createRadialGradient(W * 0.5, W * 0.48, W * 0.05, W * 0.5, W * 0.5, W * 0.72)
-  bg.addColorStop(0, "#0c2238")
-  bg.addColorStop(0.55, "#050b14")
+  const bg = ctx.createRadialGradient(W * 0.5, W * 0.48, W * 0.08, W * 0.5, W * 0.5, W * 0.7)
+  bg.addColorStop(0, "#071526")
+  bg.addColorStop(0.6, "#03080f")
   bg.addColorStop(1, "#000000")
-  ctx.globalCompositeOperation = "source-over"
   ctx.fillStyle = bg
   ctx.fillRect(0, 0, W, W)
 
   const field = W * (1 - 2 * margin)
   const cell = field / n
   const origin = W * margin
-  const quiet = origin * 0.35
 
-  // Soft quiet-zone glow ring (helps cameras find the square without cyan brackets)
   ctx.beginPath()
-  ctx.arc(W / 2, W / 2, field * 0.5 + quiet * 0.2, 0, Math.PI * 2)
-  ctx.strokeStyle = "rgba(80,170,255,0.08)"
-  ctx.lineWidth = Math.max(2, W * 0.008)
+  ctx.arc(W / 2, W / 2, field * 0.52, 0, Math.PI * 2)
+  ctx.strokeStyle = "rgba(60,150,255,0.1)"
+  ctx.lineWidth = Math.max(2, W * 0.006)
   ctx.stroke()
 
-  ctx.globalCompositeOperation = "lighter"
-
+  // Soft discs per ON module (QR silhouette), then sparkle particles
+  ctx.globalCompositeOperation = "source-over"
+  const seen = new Set()
   for(const p of cloudParticles){
-    // Local drift only — keep module occupancy so the QR stays decodable
-    const drift = p.on ? 0.1 : 0.2
+    if(!p.on) continue
+    const key = p.r * 1024 + p.c
+    if(seen.has(key)) continue
+    seen.add(key)
+    const x = origin + (p.c + 0.5) * cell
+    const y = origin + (p.r + 0.5) * cell
+    const rad = cell * (p.finder ? 0.42 : 0.34)
+    const g = ctx.createRadialGradient(x, y, 0, x, y, rad)
+    g.addColorStop(0, p.finder ? "rgba(200,236,255,0.95)" : "rgba(140,210,255,0.88)")
+    g.addColorStop(0.55, p.finder ? "rgba(40,160,255,0.75)" : "rgba(20,120,255,0.55)")
+    g.addColorStop(1, "rgba(0,30,80,0)")
+    ctx.fillStyle = g
+    ctx.beginPath()
+    ctx.arc(x, y, rad, 0, Math.PI * 2)
+    ctx.fill()
+  }
+
+  ctx.globalCompositeOperation = "lighter"
+  for(const p of cloudParticles){
+    const drift = p.on ? 0.08 : 0.15
     const jx = Math.sin(t * p.spin + p.phase) * drift
     const jy = Math.cos(t * (p.spin * 0.87) + p.phase * 1.3) * drift
     const x = origin + (p.c + 0.5 + p.ox + jx) * cell
     const y = origin + (p.r + 0.5 + p.oy + jy) * cell
-    const rad = Math.max(1.2, cell * 0.28 * p.size)
-
-    // Hot white core (luminance for the camera) + Apple-blue halo (look)
+    const rad = Math.max(1.1, cell * 0.18 * p.size)
     const g = ctx.createRadialGradient(x, y, 0, x, y, rad)
     if(p.on){
-      g.addColorStop(0, `rgba(230,248,255,${0.95 * p.bright})`)
-      g.addColorStop(0.25, `rgba(120,210,255,${0.75 * p.bright})`)
-      g.addColorStop(0.55, `rgba(30,140,255,${0.35 * p.bright})`)
-      g.addColorStop(1, "rgba(0,40,120,0)")
+      g.addColorStop(0, `rgba(220,245,255,${0.7 * p.bright})`)
+      g.addColorStop(0.35, `rgba(80,190,255,${0.45 * p.bright})`)
+      g.addColorStop(1, "rgba(0,50,140,0)")
     }else{
-      g.addColorStop(0, `rgba(100,180,255,${p.bright})`)
+      g.addColorStop(0, `rgba(80,160,255,${p.bright})`)
       g.addColorStop(1, "rgba(0,40,100,0)")
     }
     ctx.fillStyle = g
@@ -388,7 +403,11 @@ function drawQrToCanvas(text){
 
 function showQrUi(){
   if(qrImg) qrImg.hidden = true
-  if(cloudCanvas) cloudCanvas.hidden = false
+  if(cloudCanvas){
+    cloudCanvas.hidden = false
+    cloudCanvas.style.display = "block"
+    cloudCanvas.style.background = "#000"
+  }
   const align = document.getElementById("alignFrame")
   if(align) align.hidden = true
   canvasWrap.classList.remove("tx-paper")

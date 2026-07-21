@@ -13,7 +13,7 @@
 <body>
   <header>
     <h1>PartiCl</h1>
-    <p class="tagline">Particle QR · MDS · <span id="buildId">154600</span></p>
+    <p class="tagline">Particle QR · MDS · <span id="buildId">154610</span></p>
   </header>
 
   <input type="file" id="fileInput" hidden>
@@ -93,6 +93,18 @@
 
   <script src="vendor/qrcode/qrcode.js"></script>
   <script src="vendor/jsqr/jsQR.js"></script>
-  <script type="module" src="app-qr.js?v=154600"></script>
+  <script>
+    // Paint black immediately so an empty canvas never flashes white before the module loads.
+    (function(){
+      var c = document.getElementById("cloud");
+      if(!c) return;
+      c.width = 1024; c.height = 1024;
+      var ctx = c.getContext("2d");
+      if(!ctx) return;
+      ctx.fillStyle = "#000";
+      ctx.fillRect(0, 0, 1024, 1024);
+    })();
+  </script>
+  <script type="module" src="app-qr.js?v=154610"></script>
 </body>
 </html>
