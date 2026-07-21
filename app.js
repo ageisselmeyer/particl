@@ -681,6 +681,39 @@ function orderQuadCorners(pts){
   return { tl: top[0], tr: top[1], br: bot[1], bl: bot[0] }
 }
 
+function findBrightRegion(data, W, H, ox, oy, dw, dh){
+  let minX = W, minY = H, maxX = 0, maxY = 0, n = 0
+  const step = 3
+  const x1 = (ox + dw) | 0
+  const y1 = (oy + dh) | 0
+  for(let y = oy | 0; y < y1; y += step){
+    for(let x = ox | 0; x < x1; x += step){
+      if(x < 0 || y < 0 || x >= W || y >= H) continue
+      const p = (y * W + x) * 4
+      const r8 = data[p], g = data[p + 1], b = data[p + 2]
+      const peak = Math.max(r8, g, b)
+      const luma = r8 * 0.299 + g * 0.587 + b * 0.114
+      // Particle cloud / bloom — ignore dark chrome around the Mac window.
+      if(peak < 85 || luma < 55) continue
+      minX = Math.min(minX, x)
+      minY = Math.min(minY, y)
+      maxX = Math.max(maxX, x)
+      maxY = Math.max(maxY, y)
+      n++
+    }
+  }
+  if(n < 50) return null
+  const bw = maxX - minX
+  const bh = maxY - minY
+  if(bw < Math.min(dw, dh) * 0.18 || bh < Math.min(dw, dh) * 0.18) return null
+  const pad = Math.round(Math.min(bw, bh) * 0.06)
+  const x = Math.max(ox, minX - pad)
+  const y = Math.max(oy, minY - pad)
+  const r = Math.min(ox + dw, maxX + pad)
+  const btm = Math.min(oy + dh, maxY + pad)
+  return { x, y, w: r - x, h: btm - y }
+}
+
 function findCornerCentroid(data, W, H, x0, y0, w, h){
   let sx = 0, sy = 0, wsum = 0
   for(let y = y0; y < y0 + h; y++){
@@ -692,49 +725,57 @@ function findCornerCentroid(data, W, H, x0, y0, w, h){
       const sat = peak - Math.min(r8, g, b)
       // Glossy screen: skip white specular blobs (they are not cyan brackets).
       if(peak > 190 && sat < 55 && r8 > peak * 0.85) continue
-      const luma = r8 * 0.299 + g * 0.587 + b * 0.114
-      const cyan = Math.max(0, (g + b) * 0.5 - r8 * 0.35)
-      const bal = 1 - Math.min(1, (Math.abs(r8 - g) + Math.abs(g - b)) / 380)
-      const weight = (luma * 0.28 + cyan * 0.52 + peak * 0.2) * (0.5 + 0.5 * bal)
-      if(weight < 25) continue
+      // Prefer cyan/blue brackets over particle cores.
+      if(!(g > r8 * 0.95 && b > r8 * 0.95)) continue
+      const cyan = Math.max(0, (g + b) * 0.5 - r8 * 0.45)
+      if(cyan < 28) continue
+      const weight = cyan * (0.55 + 0.45 * Math.min(1, sat / 90))
+      if(weight < 22) continue
       sx += x * weight
       sy += y * weight
       wsum += weight
     }
   }
-  if(wsum < 60) return null
+  if(wsum < 40) return null
   return { x: sx / wsum, y: sy / wsum }
 }
 
 function detectAlignQuad(data, W, H, rect){
   const { ox, oy, dw, dh } = rect
-  const pad = Math.round(Math.min(dw, dh) * 0.27)
-  const cTL = findCornerCentroid(data, W, H, ox | 0, oy | 0, pad, pad)
-  const cTR = findCornerCentroid(data, W, H, (ox + dw - pad) | 0, oy | 0, pad, pad)
-  const cBR = findCornerCentroid(data, W, H, (ox + dw - pad) | 0, (oy + dh - pad) | 0, pad, pad)
-  const cBL = findCornerCentroid(data, W, H, ox | 0, (oy + dh - pad) | 0, pad, pad)
-  if(!cTL || !cTR || !cBR || !cBL) return null
+  // Phone cameras are portrait: the Mac window (and cyan brackets) sit in the
+  // middle of the frame — not at the video edges. Find the bright cloud region first.
+  const region = findBrightRegion(data, W, H, ox, oy, dw, dh)
+  const rx = region ? region.x : ox
+  const ry = region ? region.y : oy
+  const rw = region ? region.w : dw
+  const rh = region ? region.h : dh
+  const pad = Math.round(Math.min(rw, rh) * 0.28)
+  const cTL = findCornerCentroid(data, W, H, rx | 0, ry | 0, pad, pad)
+  const cTR = findCornerCentroid(data, W, H, (rx + rw - pad) | 0, ry | 0, pad, pad)
+  const cBR = findCornerCentroid(data, W, H, (rx + rw - pad) | 0, (ry + rh - pad) | 0, pad, pad)
+  const cBL = findCornerCentroid(data, W, H, rx | 0, (ry + rh - pad) | 0, pad, pad)
+  if(!cTL || !cTR || !cBR || !cBL){
+    // Still usable: sample through the bright Mac-window region even without brackets.
+    if(region && Math.min(rw, rh) > Math.min(dw, dh) * 0.2){
+      return {
+        tl: { x: rx, y: ry },
+        tr: { x: rx + rw, y: ry },
+        br: { x: rx + rw, y: ry + rh },
+        bl: { x: rx, y: ry + rh },
+        _soft: true
+      }
+    }
+    return null
+  }
   const q = orderQuadCorners([cTL, cTR, cBR, cBL])
   const wTop = Math.hypot(q.tr.x - q.tl.x, q.tr.y - q.tl.y)
   const wBot = Math.hypot(q.br.x - q.bl.x, q.br.y - q.bl.y)
   const hL = Math.hypot(q.bl.x - q.tl.x, q.bl.y - q.tl.y)
   const hR = Math.hypot(q.br.x - q.tr.x, q.br.y - q.tr.y)
   const minSide = Math.min(wTop, wBot, hL, hR)
-  if(minSide < Math.min(dw, dh) * 0.55) return null
+  if(minSide < Math.min(rw, rh) * 0.45) return null
   const maxSide = Math.max(wTop, wBot, hL, hR)
-  if(maxSide > minSide * 1.5) return null
-  // Expectation is approximate; keep tolerance high for glossy glare.
-  const tol = Math.min(dw, dh) * 0.28
-  const expect = [
-    { x: ox + ALIGN_MARKER_UV * dw, y: oy + ALIGN_MARKER_UV * dh },
-    { x: ox + (1 - ALIGN_MARKER_UV) * dw, y: oy + ALIGN_MARKER_UV * dh },
-    { x: ox + (1 - ALIGN_MARKER_UV) * dw, y: oy + (1 - ALIGN_MARKER_UV) * dh },
-    { x: ox + ALIGN_MARKER_UV * dw, y: oy + (1 - ALIGN_MARKER_UV) * dh }
-  ]
-  const got = [q.tl, q.tr, q.br, q.bl]
-  for(let i = 0; i < 4; i++){
-    if(Math.hypot(got[i].x - expect[i].x, got[i].y - expect[i].y) > tol) return null
-  }
+  if(maxSide > minSide * 1.65) return null
   return q
 }
 
@@ -785,13 +826,17 @@ function updateLockOverlay(quad, meta){
   if(!lockQuadEl || !videoWrap || !quad || !meta) return
   const wrapW = videoWrap.clientWidth
   const wrapH = videoWrap.clientHeight
-  const scale = Math.max(wrapW / meta.vw, wrapH / meta.vh)
-  const offX = (wrapW - meta.vw * scale) * 0.5
-  const offY = (wrapH - meta.vh * scale) * 0.5
-  const toScreen = (p) => ({
-    x: offX + (meta.ox + (p.x / meta.W) * meta.dw) * scale,
-    y: offY + (meta.oy + (p.y / meta.H) * meta.dh) * scale
-  })
+  // Scan canvas coords → video element object-fit:cover mapping.
+  const cover = Math.max(wrapW / meta.vw, wrapH / meta.vh)
+  const visW = meta.vw * cover
+  const visH = meta.vh * cover
+  const offX = (wrapW - visW) * 0.5
+  const offY = (wrapH - visH) * 0.5
+  const toScreen = (p) => {
+    const vx = ((p.x - meta.ox) / meta.dw) * meta.vw
+    const vy = ((p.y - meta.oy) / meta.dh) * meta.vh
+    return { x: offX + vx * cover, y: offY + vy * cover }
+  }
   const tl = toScreen(quad.tl), tr = toScreen(quad.tr), br = toScreen(quad.br), bl = toScreen(quad.bl)
   const minX = Math.min(tl.x, tr.x, br.x, bl.x)
   const minY = Math.min(tl.y, tr.y, br.y, bl.y)
@@ -800,8 +845,8 @@ function updateLockOverlay(quad, meta){
   lockQuadEl.style.display = "block"
   lockQuadEl.style.left = minX + "px"
   lockQuadEl.style.top = minY + "px"
-  lockQuadEl.style.width = (maxX - minX) + "px"
-  lockQuadEl.style.height = (maxY - minY) + "px"
+  lockQuadEl.style.width = Math.max(0, maxX - minX) + "px"
+  lockQuadEl.style.height = Math.max(0, maxY - minY) + "px"
 }
 
 function sampleCloudBitsFromVideo(){
@@ -830,11 +875,11 @@ function sampleCloudBitsFromVideo(){
     lastGoodQuad = quad
     lastGoodQuadAge = 0
     decodeAlignMiss = 0
-    decodeAlignLocked = true
-    decodeDbg.align = "locked"
+    decodeAlignLocked = !quad._soft
+    decodeDbg.align = quad._soft ? "region" : "locked"
     decodeDbg.sticky = 0
     updateLockOverlay(useQuad, { vw, vh, W, H, dw, dh, ox, oy })
-  }else if(lastGoodQuad && lastGoodQuadAge < 10){
+  }else if(lastGoodQuad && lastGoodQuadAge < 18){
     // Glare can temporarily hide the corners; re-use the last stable quad.
     useQuad = lastGoodQuad
     lastGoodQuadAge++
@@ -931,13 +976,20 @@ function setCheckRow(rowEl, ok, markEl, labelEl, labelText){
 function updateDecodeChecklist(){
   if(!decodeChecklistEl) return
 
-  const cornersOk = !!decodeAlignLocked
+  const cornersOk = !!decodeAlignLocked || decodeDbg.align === "region" || decodeDbg.align === "sticky"
+  const cornersLabel = decodeDbg.align === "locked"
+    ? "Corners locked"
+    : decodeDbg.align === "region"
+      ? "Cloud region locked"
+      : decodeDbg.align === "sticky"
+        ? "Corners sticky"
+        : "Find cyan corners"
   setCheckRow(
     chkCornersRow,
     cornersOk,
     chkCornersRow?.querySelector(".chkMark"),
     chkCornersLabel,
-    cornersOk ? "Corners locked" : "Find cyan corners"
+    cornersLabel
   )
 
   const payloadLabel = rxFountain
@@ -1164,7 +1216,7 @@ function bitsToPayload(bits){
     let ok = 0
     for(let j = 0; j < SYNC.length; j++) if(bits[i + j] === SYNC[j]) ok++
     if(ok > bestOk) bestOk = ok
-    if(ok >= 28){ start = i; break }
+    if(ok >= 24){ start = i; break }
   }
   decodeDbg.sync = bestOk
   if(start < 0){
