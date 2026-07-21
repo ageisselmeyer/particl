@@ -71,7 +71,7 @@ button:active{ transform:translateY(0); }
   width:min(92vw, 560px);
   height:min(92vw, 560px);
   margin:16px auto 0;
-  border-radius:28px;
+  border-radius:28px; /* rounded square — never a circle */
   overflow:hidden;
   background:#000;
   box-shadow:0 0 0 1px rgba(255,255,255,0.06), 0 30px 80px rgba(0,40,80,0.35);

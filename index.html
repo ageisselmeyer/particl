@@ -105,7 +105,7 @@
         wrap.classList.remove("tx-cloud");
         wrap.classList.add("tx-paper");
         wrap.style.background = "#fff";
-        wrap.style.borderRadius = "";
+        wrap.style.borderRadius = "28px"; // square card (not a circle)
       }
       if(!c || typeof qrcode !== "function") return false;
       var qr = qrcode(0, "Q");
@@ -131,8 +131,8 @@
 
       var origin = quiet * cell;
       var mid = (n - 1) / 2;
-      // Circle sits between the three finder eyes (leaves corners clear)
-      var diskR = mid - 3.2;
+      // Circle of dots between the three finder eyes
+      var diskR = mid - 2.8;
       var diskR2 = diskR * diskR;
       var dotRad = cell * 0.48;
 
@@ -153,20 +153,12 @@
           var y0 = origin + r * cell;
 
           if(isFinder(r, col)){
-            // Corner finders — solid squares at the edges
+            // Corner finders on the square edges
             ctx.fillRect(x0, y0, cell, cell);
             continue;
           }
 
-          // Timing patterns help scanners; keep them even near the rim
-          if(r === 6 || col === 6){
-            ctx.beginPath();
-            ctx.arc(x0 + cell * 0.5, y0 + cell * 0.5, dotRad, 0, Math.PI * 2);
-            ctx.fill();
-            continue;
-          }
-
-          // Data modules only as a black-dot circle in the middle
+          // Black-dot circle only (no timing arms outside the disk)
           if(!inDotCircle(r, col)) continue;
           ctx.beginPath();
           ctx.arc(x0 + cell * 0.5, y0 + cell * 0.5, dotRad, 0, Math.PI * 2);
@@ -179,6 +171,6 @@
     var st = document.getElementById("status");
     if(st) st.textContent = "Boot square + dot circle · loading module…";
   </script>
-  <script type="module" src="app-qr.js?v=154690"></script>
+  <script type="module" src="app-qr.js?v=154700"></script>
 </body>
 </html>
