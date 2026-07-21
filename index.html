@@ -13,7 +13,7 @@
 <body>
   <header>
     <h1>PartiCl</h1>
-    <p class="tagline">QR · MDS · <span id="buildId">154640</span></p>
+    <p class="tagline">QR · MDS · <span id="buildId">154650</span></p>
   </header>
 
   <input type="file" id="fileInput" hidden>
@@ -94,7 +94,7 @@
   <script src="vendor/qrcode/qrcode.js"></script>
   <script src="vendor/jsqr/jsQR.js"></script>
   <script>
-    // Classic boot paint — white paper + black modules (best camera decode contrast).
+    // Classic boot paint — standard square modules on white (scannable by BarcodeDetector / jsQR).
     window.__particlPaintCloud = function(text){
       var c = document.getElementById("cloud");
       var wrap = document.getElementById("canvasWrap");
@@ -110,32 +110,26 @@
       qr.addData(String(text || "PartiCl"), "Byte");
       qr.make();
       var n = qr.getModuleCount();
+      var quiet = 4; // modules of white border
       var W = 1024;
+      var cell = Math.floor(W / (n + quiet * 2));
+      var size = cell * (n + quiet * 2);
       c.hidden = false;
       c.style.display = "block";
       c.style.opacity = "1";
       c.style.background = "#fff";
-      c.width = W;
-      c.height = W;
+      c.width = size;
+      c.height = size;
       var ctx = c.getContext("2d");
       if(!ctx) return false;
-      ctx.globalCompositeOperation = "source-over";
       ctx.fillStyle = "#ffffff";
-      ctx.fillRect(0, 0, W, W);
-      var margin = 0.08;
-      var field = W * (1 - 2 * margin);
-      var cell = field / n;
-      var origin = W * margin;
-      var rad = cell * 0.42;
+      ctx.fillRect(0, 0, size, size);
       ctx.fillStyle = "#000000";
+      var origin = quiet * cell;
       for(var r = 0; r < n; r++){
         for(var col = 0; col < n; col++){
           if(!qr.isDark(r, col)) continue;
-          var x = origin + (col + 0.5) * cell;
-          var y = origin + (r + 0.5) * cell;
-          ctx.beginPath();
-          ctx.arc(x, y, rad, 0, Math.PI * 2);
-          ctx.fill();
+          ctx.fillRect(origin + col * cell, origin + r * cell, cell, cell);
         }
       }
       return true;
@@ -144,6 +138,6 @@
     var st = document.getElementById("status");
     if(st) st.textContent = "Boot QR painted · loading module…";
   </script>
-  <script type="module" src="app-qr.js?v=154640"></script>
+  <script type="module" src="app-qr.js?v=154650"></script>
 </body>
 </html>
