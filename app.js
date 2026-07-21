@@ -254,39 +254,31 @@ function bitsToBytes(bits){
   return out
 }
 
-// Fill the full square: block-repeat payload bits across all DATA_COUNT cells.
+// Fill the full square evenly — each payload bit gets a contiguous run of cells.
+// (Front-loading extras onto SYNC caused 32/32 SYNC with CRC-fail on the body.)
 function expandBits(payload, n){
   const L = payload.length
   if(L <= 0) return "0".repeat(n)
   if(L >= n) return payload.slice(0, n)
-  const rep = (n / L) | 0
-  const extra = n - rep * L
-  let out = ""
+  const out = new Array(n)
   for(let i = 0; i < L; i++){
-    const copies = rep + (i < extra ? 1 : 0)
-    const bit = payload[i]
-    for(let c = 0; c < copies; c++) out += bit
+    const a = Math.floor(i * n / L)
+    const b = Math.floor((i + 1) * n / L)
+    for(let j = a; j < b; j++) out[j] = payload[i]
   }
-  return out
+  return out.join("")
 }
 
 function collapseVals(vals, targetLen){
   const n = vals.length
   const L = targetLen
-  if(L >= n){
-    const out = new Float32Array(L)
-    out.set(vals.length >= L ? vals.subarray(0, L) : vals)
-    return out
-  }
-  const rep = (n / L) | 0
-  const extra = n - rep * L
   const out = new Float32Array(L)
-  let idx = 0
   for(let i = 0; i < L; i++){
-    const copies = rep + (i < extra ? 1 : 0)
+    const a = Math.floor(i * n / L)
+    const b = Math.max(a + 1, Math.floor((i + 1) * n / L))
     let s = 0
-    for(let c = 0; c < copies; c++) s += vals[idx++]
-    out[i] = s / copies
+    for(let j = a; j < b; j++) s += vals[j]
+    out[i] = s / (b - a)
   }
   return out
 }
@@ -1098,7 +1090,7 @@ function valsToPayload(vals){
     const amb = []
     for(let i = SYNC.length; i < bestBits.length; i++) amb.push({ i, c: bestConf[i] ?? 1e9 })
     amb.sort((a, b) => a.c - b.c)
-    const top = amb.slice(0, 8).map(x => x.i)
+    const top = amb.slice(0, 12).map(x => x.i)
     const flipAt = (src, idx) => {
       const arr = src.split("")
       arr[idx] = arr[idx] === "1" ? "0" : "1"
@@ -1111,6 +1103,19 @@ function valsToPayload(vals){
         decodeDbg.crc = "ok"
         decodeDbg.last = `${hit.startLabel} ${hit.text.slice(0, 24)}…`
         return hit.text
+      }
+    }
+    for(let a = 0; a < Math.min(6, top.length); a++){
+      for(let b = a + 1; b < Math.min(6, top.length); b++){
+        let s = flipAt(bestBits, top[a])
+        s = flipAt(s, top[b])
+        const hit = decodeBodyText(s.slice(SYNC.length), `flip2`)
+        triedLens += hit.tried
+        if(hit.text){
+          decodeDbg.crc = "ok"
+          decodeDbg.last = `${hit.startLabel} ${hit.text.slice(0, 24)}…`
+          return hit.text
+        }
       }
     }
   }
