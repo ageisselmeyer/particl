@@ -29,10 +29,19 @@
 
   <div id="canvasWrap">
     <canvas id="cloud"></canvas>
+    <div id="alignFrame" aria-hidden="true">
+      <span class="align-mark align-tl"></span>
+      <span class="align-mark align-tr"></span>
+      <span class="align-mark align-br"></span>
+      <span class="align-mark align-bl"></span>
+    </div>
   </div>
 
   <div id="videoWrap" hidden>
     <video id="video" autoplay playsinline muted></video>
+    <div id="decodeOverlay" aria-hidden="true">
+      <div id="lockQuad"></div>
+    </div>
   </div>
 
   <div id="decodeProgressWrap" hidden>

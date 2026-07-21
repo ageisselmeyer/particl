@@ -15,6 +15,7 @@ const downloadLink = document.getElementById("download")
 const progressWrap = document.getElementById("decodeProgressWrap")
 const progressBar = document.getElementById("decodeProgressBar")
 const progressText = document.getElementById("decodeProgressText")
+const lockQuadEl = document.getElementById("lockQuad")
 
 document.getElementById("btnEncode").addEventListener("click", () => {
   fileInput.value = ""
@@ -33,10 +34,100 @@ function setStatus(msg){
 // --- Protocol ---
 const PARTICLE_COUNT = 22000
 const DATA_COUNT = 4096 // bits carried per frame (subset of particles)
-const FRAME_HOLD_MS = 480
+const FRAME_HOLD_MS = 520
 const FRAME_BLEND_MS = 220
 
+// Corner brackets on TX match these normalized positions (center of L-mark).
+const ALIGN_MARKER_UV = 0.075
+const SAMPLE_INSET = 0.11
+
 const SYNC = "11001100111100001010101011001100" // 32-bit
+
+// Fountain (LT-style): k source symbols + ~25% repair → recover from ~80% of sent frames.
+const SYMBOL_SIZE = 136
+const FOUNTAIN_SOURCE_COPIES = 2
+const FOUNTAIN_REPAIR_BASE = 0.4
+
+function fountainRng(seed){
+  let s = seed >>> 0
+  return () => {
+    s = (Math.imul(s, 1664525) + 1013904223) >>> 0
+    return s / 4294967296
+  }
+}
+
+function pickLtDegree(k, rnd){
+  const u = rnd()
+  if(u < 1 / k) return 1
+  let d = 2
+  let cum = 1 / k
+  while(d < k){
+    cum += 1 / (d * (d - 1))
+    if(u < cum) return d
+    d++
+  }
+  return Math.min(k, 2 + ((rnd() * Math.min(k, 8)) | 0))
+}
+
+function ltIndices(k, seed){
+  const rnd = fountainRng(seed)
+  const d = Math.min(k, Math.max(1, pickLtDegree(k, rnd)))
+  const set = new Set()
+  let guard = 0
+  while(set.size < d && guard++ < k * 8) set.add((rnd() * k) | 0)
+  if(!set.size) set.add(0)
+  return [...set]
+}
+
+function xorBytes(into, from){
+  const n = Math.min(into.length, from.length)
+  for(let i = 0; i < n; i++) into[i] ^= from[i]
+}
+
+function ltDecodePeel(k, symbolMap){
+  const eqs = []
+  for(const sym of symbolMap.values()){
+    eqs.push({ indices: new Set(sym.indices), data: sym.data.slice() })
+  }
+  const known = new Array(k).fill(null)
+  let changed = true
+  while(changed){
+    changed = false
+    for(let e = eqs.length - 1; e >= 0; e--){
+      const eq = eqs[e]
+      for(const idx of [...eq.indices]){
+        if(known[idx]){
+          xorBytes(eq.data, known[idx])
+          eq.indices.delete(idx)
+        }
+      }
+      if(eq.indices.size === 0){
+        let ok = true
+        for(let i = 0; i < eq.data.length; i++) if(eq.data[i]){ ok = false; break }
+        if(!ok) return null
+        eqs.splice(e, 1)
+        continue
+      }
+      if(eq.indices.size === 1){
+        const i = [...eq.indices][0]
+        known[i] = eq.data
+        eqs.splice(e, 1)
+        changed = true
+      }
+    }
+  }
+  for(let i = 0; i < k; i++) if(!known[i]) return null
+  return known
+}
+
+function fileIdSeed(fileId, j){
+  let h = 2166136261 >>> 0
+  for(let i = 0; i < fileId.length; i++){
+    h ^= fileId.charCodeAt(i)
+    h = Math.imul(h, 16777619) >>> 0
+  }
+  return (h ^ Math.imul(j + 1, 0x9e3779b1)) >>> 0
+}
 
 function hash01(i, salt){
   let x = Math.imul(i ^ (salt * 0x9e3779b9), 0x85ebca6b) >>> 0
@@ -154,6 +245,8 @@ let phaseStartedAt = 0
 let animPhase = "hold" // hold | blend
 let meta = null
 
+const CAMERA_BASE = { x: 0, y: 0.08, z: 4.15 }
+
 const vertexShader = /* glsl */`
 attribute float aPhase;
 attribute float aRadius;
@@ -217,26 +310,29 @@ void main(){
   float d = dot(uv, uv);
   if(d > 1.0) discard;
 
-  float core = exp(-d * 4.5);
-  float halo = exp(-d * 1.8) * 0.35;
-  float glow = core + halo;
+  float r = sqrt(d);
+  // Orb sprite: white hot core → cyan → soft transparent edge
+  float core = exp(-d * 5.5);
+  float mid = exp(-d * 2.2);
+  float edge = smoothstep(1.0, 0.35, r);
 
-  // Off bits nearly invisible; on bits read as cyan sparks
+  vec3 cWhite = vec3(1.0, 1.0, 1.0);
+  vec3 cCyan  = vec3(0.659, 0.953, 1.0);   // #A8F3FF
+  vec3 cBlue  = vec3(0.082, 0.486, 1.0);   // #157CFF
+
+  vec3 col = mix(cBlue, cCyan, smoothstep(0.15, 0.72, 1.0 - r));
+  col = mix(col, cWhite, core * 0.92 + mid * 0.08);
+
   float live = smoothstep(0.12, 0.55, vSignal);
-  float alpha = glow * mix(0.04, 0.95, live) * mix(0.5, 1.0, vFill);
+  float alpha = edge * (core * 0.85 + mid * 0.45);
+  alpha *= mix(0.05, 1.0, live) * mix(0.45, 1.0, vFill);
 
-  vec3 cyan = vec3(0.25, 0.85, 1.0);
-  vec3 blue = vec3(0.10, 0.40, 1.0);
-  vec3 white = vec3(0.85, 0.95, 1.0);
-  vec3 col = mix(blue, cyan, core);
-  col = mix(col, white, core * live * 0.55);
-  col *= vBright;
-
+  col *= vBright * (0.7 + 0.55 * live);
   float fog = smoothstep(5.8, 1.6, vDepth);
   alpha *= 0.35 + 0.65 * fog;
-  col *= 0.65 + 0.35 * fog;
+  col *= 0.68 + 0.32 * fog;
 
-  gl_FragColor = vec4(col * (0.55 + 0.7 * live), alpha);
+  gl_FragColor = vec4(col * (0.65 + 0.75 * live), alpha);
 }
 `
 
@@ -259,7 +355,7 @@ function initCloud(){
 
   scene = new THREE.Scene()
   camera = new THREE.PerspectiveCamera(38, w / h, 0.1, 100)
-  camera.position.set(0, 0.08, 4.15)
+  camera.position.set(CAMERA_BASE.x, CAMERA_BASE.y, CAMERA_BASE.z)
 
   const dirs = fibonacciSphere(PARTICLE_COUNT)
   particleDirs = dirs
@@ -309,8 +405,8 @@ function initCloud(){
   scene.add(points)
 
   const renderPass = new RenderPass(scene, camera)
-  // Soft glow without washing the sphere into a white disc
-  bloomPass = new UnrealBloomPass(new THREE.Vector2(w, h), 0.72, 0.42, 0.28)
+  // Stronger bloom on bright cores only (high threshold avoids full-sphere washout)
+  bloomPass = new UnrealBloomPass(new THREE.Vector2(w, h), 1.12, 0.48, 0.52)
   composer = new EffectComposer(renderer)
   composer.addPass(renderPass)
   composer.addPass(bloomPass)
@@ -362,6 +458,11 @@ function renderLoop(now){
   points.rotation.y = t * 0.12
   points.rotation.x = Math.sin(t * 0.15) * 0.08
 
+  camera.position.x = CAMERA_BASE.x + Math.sin(t * 0.15) * 0.12
+  camera.position.y = CAMERA_BASE.y + Math.cos(t * 0.18) * 0.08
+  camera.position.z = CAMERA_BASE.z
+  camera.lookAt(0, 0, 0)
+
   const dt = Math.min(0.05, (renderLoop._last ? (now - renderLoop._last) : 16) / 1000)
   renderLoop._last = now
   lerpSignals(dt)
@@ -374,31 +475,64 @@ function renderLoop(now){
   composer.render()
 }
 
-// --- Encode ---
+// --- Encode (fountain / LT-style) ---
 function buildFrames(fileBytes, fileMeta){
   const fileId = (crypto.getRandomValues(new Uint32Array(1))[0] >>> 0).toString(36)
-  const chunkSize = 180
-  const total = Math.max(1, Math.ceil(fileBytes.length / chunkSize))
-  const out = []
+  const k = Math.max(1, Math.ceil(fileBytes.length / SYMBOL_SIZE))
+  const padded = new Uint8Array(k * SYMBOL_SIZE)
+  padded.set(fileBytes)
+  const sources = []
+  for(let i = 0; i < k; i++){
+    sources.push(padded.subarray(i * SYMBOL_SIZE, (i + 1) * SYMBOL_SIZE))
+  }
+  const r = Math.max(3, Math.ceil(k * FOUNTAIN_REPAIR_BASE))
 
-  for(let i = 0; i < total; i++){
-    const start = i * chunkSize
-    const chunk = fileBytes.slice(start, Math.min(fileBytes.length, start + chunkSize))
-    const includeMeta = i === 0 || i % 5 === 0 || i === total - 1
+  const packets = []
+  for(let copy = 0; copy < FOUNTAIN_SOURCE_COPIES; copy++){
+    for(let i = 0; i < k; i++){
+      packets.push({ seq: i, seed: 0, data: sources[i].slice() })
+    }
+  }
+  for(let j = 0; j < r; j++){
+    const seed = fileIdSeed(fileId, j)
+    const indices = ltIndices(k, seed)
+    const data = new Uint8Array(SYMBOL_SIZE)
+    for(const idx of indices) xorBytes(data, sources[idx])
+    packets.push({ seq: k + j, seed, data })
+  }
+  for(let i = packets.length - 1; i > 0; i--){
+    const j = Math.floor(hash01(i, 91) * (i + 1))
+    const t = packets[i]; packets[i] = packets[j]; packets[j] = t
+  }
+
+  const out = []
+  for(let pi = 0; pi < packets.length; pi++){
+    const p = packets[pi]
+    const includeMeta = pi === 0 || pi % 6 === 0 || pi === packets.length - 1
     let payload
     if(includeMeta){
       payload = [
-        "PC5M",
+        "PC6M",
         fileId,
-        String(i),
-        String(total),
+        String(k),
+        String(r),
         String(fileMeta.size >>> 0),
         utf8ToB64(fileMeta.name || "file"),
         utf8ToB64(fileMeta.type || "application/octet-stream"),
-        bytesToB64(chunk)
+        String(p.seq),
+        String(p.seed >>> 0),
+        bytesToB64(p.data)
       ].join("|")
     }else{
-      payload = ["PC5D", fileId, String(i), String(total), bytesToB64(chunk)].join("|")
+      payload = [
+        "PC6",
+        fileId,
+        String(k),
+        String(r),
+        String(p.seq),
+        String(p.seed >>> 0),
+        bytesToB64(p.data)
+      ].join("|")
     }
     const raw = new TextEncoder().encode(payload)
     const crc = crc32(raw)
@@ -414,6 +548,7 @@ function buildFrames(fileBytes, fileMeta){
     else bits = bits.slice(0, DATA_COUNT)
     out.push(bits)
   }
+  out._fountain = { k, r, copies: FOUNTAIN_SOURCE_COPIES, total: packets.length }
   return out
 }
 
@@ -427,6 +562,7 @@ function encodeFile(file){
       size: bytes.length
     }
     frames = buildFrames(bytes, meta)
+    const ft = frames._fountain || {}
     frameIndex = 0
     animPhase = "hold"
     phaseStartedAt = 0
@@ -435,7 +571,9 @@ function encodeFile(file){
     videoWrap.hidden = true
     canvasWrap.style.display = ""
     setSignalBits(frames[0])
-    setStatus(`Streaming “${meta.name}” · ${frames.length} cloud frames · point another device’s camera here`)
+    setStatus(
+      `Streaming “${meta.name}” · ${frames.length} frames (${ft.k || "?"}×${ft.copies || 2} + ${ft.r || "?"} repair) · ~80% decode OK · point camera here`
+    )
   }
   reader.readAsArrayBuffer(file)
 }
@@ -469,11 +607,296 @@ let rxHave = new Set()
 let rxTotal = null
 let rxFileId = null
 let rxMeta = null
+let rxFountain = false
+let rxK = null
+let rxR = null
+let rxSymbols = new Map() // seq -> { data, seed, indices }
+let rxDecodeCount = 0
 let decodeRunning = false
 let detector = null
+let decodeBitAccum = null
+let decodeBitFrames = 0
+let decodeAlignLocked = false
+let decodeAlignMiss = 0
+const DECODE_ACCUM_MIN = 6
+const DECODE_ACCUM_MAX = 14
+let decodeFrameNo = 0
+
+function bilinearInQuad(u, v, tl, tr, br, bl){
+  const x =
+    (1 - u) * (1 - v) * tl.x + u * (1 - v) * tr.x + u * v * br.x + (1 - u) * v * bl.x
+  const y =
+    (1 - u) * (1 - v) * tl.y + u * (1 - v) * tr.y + u * v * br.y + (1 - u) * v * bl.y
+  return { x, y }
+}
+
+function orderQuadCorners(pts){
+  const byY = pts.slice().sort((a, b) => a.y - b.y)
+  const top = byY.slice(0, 2).sort((a, b) => a.x - b.x)
+  const bot = byY.slice(2, 4).sort((a, b) => a.x - b.x)
+  return { tl: top[0], tr: top[1], br: bot[1], bl: bot[0] }
+}
+
+function findCornerCentroid(data, W, H, x0, y0, w, h){
+  let sx = 0, sy = 0, wsum = 0
+  for(let y = y0; y < y0 + h; y++){
+    for(let x = x0; x < x0 + w; x++){
+      if(x < 0 || y < 0 || x >= W || y >= H) continue
+      const p = (y * W + x) * 4
+      const r8 = data[p], g = data[p + 1], b = data[p + 2]
+      const peak = Math.max(r8, g, b)
+      const sat = peak - Math.min(r8, g, b)
+      // Glossy screen: skip white specular blobs (they are not cyan brackets).
+      if(peak > 175 && sat < 45 && r8 > peak * 0.82) continue
+      const luma = r8 * 0.299 + g * 0.587 + b * 0.114
+      const cyan = Math.max(0, (g + b) * 0.5 - r8 * 0.35)
+      const bal = 1 - Math.min(1, (Math.abs(r8 - g) + Math.abs(g - b)) / 380)
+      const weight = (luma * 0.28 + cyan * 0.52 + peak * 0.2) * (0.5 + 0.5 * bal)
+      if(weight < 32) continue
+      sx += x * weight
+      sy += y * weight
+      wsum += weight
+    }
+  }
+  if(wsum < 70) return null
+  return { x: sx / wsum, y: sy / wsum }
+}
+
+function detectAlignQuad(data, W, H, rect){
+  const { ox, oy, dw, dh } = rect
+  const pad = Math.round(Math.min(dw, dh) * 0.22)
+  const cTL = findCornerCentroid(data, W, H, ox | 0, oy | 0, pad, pad)
+  const cTR = findCornerCentroid(data, W, H, (ox + dw - pad) | 0, oy | 0, pad, pad)
+  const cBR = findCornerCentroid(data, W, H, (ox + dw - pad) | 0, (oy + dh - pad) | 0, pad, pad)
+  const cBL = findCornerCentroid(data, W, H, ox | 0, (oy + dh - pad) | 0, pad, pad)
+  if(!cTL || !cTR || !cBR || !cBL) return null
+  const q = orderQuadCorners([cTL, cTR, cBR, cBL])
+  const wTop = Math.hypot(q.tr.x - q.tl.x, q.tr.y - q.tl.y)
+  const wBot = Math.hypot(q.br.x - q.bl.x, q.br.y - q.bl.y)
+  const hL = Math.hypot(q.bl.x - q.tl.x, q.bl.y - q.tl.y)
+  const hR = Math.hypot(q.br.x - q.tr.x, q.br.y - q.tr.y)
+  const minSide = Math.min(wTop, wBot, hL, hR)
+  if(minSide < Math.min(dw, dh) * 0.55) return null
+  const maxSide = Math.max(wTop, wBot, hL, hR)
+  if(maxSide > minSide * 1.5) return null
+  const tol = Math.min(dw, dh) * 0.16
+  const expect = [
+    { x: ox + ALIGN_MARKER_UV * dw, y: oy + ALIGN_MARKER_UV * dh },
+    { x: ox + (1 - ALIGN_MARKER_UV) * dw, y: oy + ALIGN_MARKER_UV * dh },
+    { x: ox + (1 - ALIGN_MARKER_UV) * dw, y: oy + (1 - ALIGN_MARKER_UV) * dh },
+    { x: ox + ALIGN_MARKER_UV * dw, y: oy + (1 - ALIGN_MARKER_UV) * dh }
+  ]
+  const got = [q.tl, q.tr, q.br, q.bl]
+  for(let i = 0; i < 4; i++){
+    if(Math.hypot(got[i].x - expect[i].x, got[i].y - expect[i].y) > tol) return null
+  }
+  return q
+}
+
+function sampleLumaAt(data, W, H, x, y){
+  const ix = Math.max(0, Math.min(W - 1, x | 0))
+  const iy = Math.max(0, Math.min(H - 1, y | 0))
+  let acc = 0, n = 0
+  for(let dy = -1; dy <= 1; dy++){
+    for(let dx = -1; dx <= 1; dx++){
+      const xx = ix + dx, yy = iy + dy
+      if(xx < 0 || yy < 0 || xx >= W || yy >= H) continue
+      const p = (yy * W + xx) * 4
+      const bb = data[p + 2], g = data[p + 1], r8 = data[p]
+      const peak = Math.max(r8, g, bb)
+      const sat = peak - Math.min(r8, g, bb)
+      if(peak > 175 && sat < 40 && r8 > peak * 0.8) continue
+      const luma = r8 * 0.299 + g * 0.587 + bb * 0.114
+      const cyan = Math.max(0, (g + bb) * 0.5 - r8 * 0.3)
+      acc += luma * 0.35 + peak * 0.35 + cyan * 0.3
+      n++
+    }
+  }
+  return n ? acc / n : 0
+}
+
+function bitsFromAccum(accum, frames){
+  if(!accum || frames < 1) return null
+  let sum = 0
+  for(let i = 0; i < DATA_COUNT; i++) sum += accum[i] / frames
+  const mean = sum / DATA_COUNT
+  let varSum = 0
+  for(let i = 0; i < DATA_COUNT; i++){
+    const v = accum[i] / frames
+    const d = v - mean
+    varSum += d * d
+  }
+  const std = Math.sqrt(varSum / DATA_COUNT)
+  const thr = mean + std * 0.12
+  let bits = ""
+  for(let i = 0; i < DATA_COUNT; i++) bits += (accum[i] / frames) > thr ? "1" : "0"
+  return bits
+}
+
+function updateLockOverlay(quad, meta){
+  if(!lockQuadEl || !videoWrap || !quad || !meta) return
+  const wrapW = videoWrap.clientWidth
+  const wrapH = videoWrap.clientHeight
+  const scale = Math.max(wrapW / meta.vw, wrapH / meta.vh)
+  const offX = (wrapW - meta.vw * scale) * 0.5
+  const offY = (wrapH - meta.vh * scale) * 0.5
+  const toScreen = (p) => ({
+    x: offX + (meta.ox + (p.x / meta.W) * meta.dw) * scale,
+    y: offY + (meta.oy + (p.y / meta.H) * meta.dh) * scale
+  })
+  const tl = toScreen(quad.tl), tr = toScreen(quad.tr), br = toScreen(quad.br), bl = toScreen(quad.bl)
+  const minX = Math.min(tl.x, tr.x, br.x, bl.x)
+  const minY = Math.min(tl.y, tr.y, br.y, bl.y)
+  const maxX = Math.max(tl.x, tr.x, br.x, bl.x)
+  const maxY = Math.max(tl.y, tr.y, br.y, bl.y)
+  lockQuadEl.style.display = "block"
+  lockQuadEl.style.left = minX + "px"
+  lockQuadEl.style.top = minY + "px"
+  lockQuadEl.style.width = (maxX - minX) + "px"
+  lockQuadEl.style.height = (maxY - minY) + "px"
+}
+
+function sampleCloudBitsFromVideo(){
+  const vw = video.videoWidth, vh = video.videoHeight
+  if(!vw || !vh || !particleDirs) return null
+  const scan = sampleCloudBitsFromVideo._c || (sampleCloudBitsFromVideo._c = document.createElement("canvas"))
+  const S = 480
+  scan.width = S
+  scan.height = S
+  const c = scan.getContext("2d", { willReadFrequently: true })
+  c.fillStyle = "#000"
+  c.fillRect(0, 0, S, S)
+  const scale = S / Math.max(vw, vh)
+  const dw = vw * scale
+  const dh = vh * scale
+  const ox = (S - dw) * 0.5
+  const oy = (S - dh) * 0.5
+  c.drawImage(video, 0, 0, vw, vh, ox, oy, dw, dh)
+  const img = c.getImageData(0, 0, S, S)
+  const data = img.data
+  const W = S, H = S
+
+  let quad = detectAlignQuad(data, W, H, { ox, oy, dw, dh })
+  let useQuad = quad
+  if(!useQuad){
+    decodeAlignMiss++
+    decodeAlignLocked = false
+    if(lockQuadEl) lockQuadEl.style.display = "none"
+    // Fallback: centered square (legacy path)
+    const side = Math.min(dw, dh)
+    const fx = ox + (dw - side) * 0.5
+    const fy = oy + (dh - side) * 0.5
+    useQuad = {
+      tl: { x: fx, y: fy },
+      tr: { x: fx + side, y: fy },
+      br: { x: fx + side, y: fy + side },
+      bl: { x: fx, y: fy + side }
+    }
+  }else{
+    decodeAlignMiss = 0
+    decodeAlignLocked = true
+    updateLockOverlay(useQuad, { vw, vh, W, H, dw, dh, ox, oy })
+  }
+
+  const inset = SAMPLE_INSET
+  const vals = new Float32Array(DATA_COUNT)
+  for(let b = 0; b < DATA_COUNT; b++){
+    const i = DATA_INDICES[b]
+    const x = particleDirs[i * 3]
+    const y = particleDirs[i * 3 + 1]
+    const z = particleDirs[i * 3 + 2]
+    const depth = z + 1.4
+    const px = (x / depth) * 0.88
+    const py = (y / depth) * 0.88
+    let u = px * 0.5 + 0.5
+    let v = -py * 0.5 + 0.5
+    u = inset + u * (1 - inset * 2)
+    v = inset + v * (1 - inset * 2)
+    const p = bilinearInQuad(u, v, useQuad.tl, useQuad.tr, useQuad.br, useQuad.bl)
+    vals[b] = sampleLumaAt(data, W, H, p.x, p.y)
+  }
+
+  if(!decodeBitAccum) decodeBitAccum = new Float32Array(DATA_COUNT)
+  for(let i = 0; i < DATA_COUNT; i++) decodeBitAccum[i] += vals[i]
+  decodeBitFrames++
+  if(decodeBitFrames > DECODE_ACCUM_MAX){
+    const keep = DECODE_ACCUM_MAX - 1
+    const scale = keep / decodeBitFrames
+    for(let i = 0; i < DATA_COUNT; i++) decodeBitAccum[i] *= scale
+    decodeBitFrames = keep
+  }
+  sampleCloudBitsFromVideo._meta = { quad: useQuad, aligned: !!quad }
+
+  if(decodeBitFrames < DECODE_ACCUM_MIN) return null
+  return bitsFromAccum(decodeBitAccum, decodeBitFrames)
+}
+
+function resetDecodeAccum(){
+  decodeBitAccum = new Float32Array(DATA_COUNT)
+  decodeBitFrames = 0
+}
+
+function resetRxState(){
+  rxChunks = new Map()
+  rxHave = new Set()
+  rxTotal = null
+  rxFileId = null
+  rxMeta = null
+  rxFountain = false
+  rxK = null
+  rxR = null
+  rxSymbols = new Map()
+  rxDecodeCount = 0
+}
+
+function ingestFountainSymbol(fileId, k, r, seq, seed, data){
+  if(!Number.isFinite(k) || !Number.isFinite(r) || k < 1 || r < 0) return false
+  if(!Number.isFinite(seq) || seq < 0 || seq >= k + r) return false
+  if(rxFileId == null) rxFileId = fileId
+  if(fileId !== rxFileId) return false
+  rxFountain = true
+  rxK = k
+  rxR = r
+  rxTotal = k
+  rxDecodeCount++
+  if(rxSymbols.has(seq)) return true
+  const sym = new Uint8Array(SYMBOL_SIZE)
+  sym.set(data.subarray(0, SYMBOL_SIZE))
+  const indices = seq < k ? [seq] : ltIndices(k, seed >>> 0)
+  rxSymbols.set(seq, { data: sym, seed: seed >>> 0, indices })
+  rxHave.add(seq)
+  return true
+}
 
 function ingestPayloadText(text){
   if(!text || typeof text !== "string") return false
+  if(text.startsWith("PC6M|")){
+    const parts = text.split("|")
+    if(parts.length < 10) return false
+    const fileId = parts[1]
+    const k = parseInt(parts[2], 10)
+    const r = parseInt(parts[3], 10)
+    const size = parseInt(parts[4], 10)
+    const name = b64ToUtf8(parts[5])
+    const type = b64ToUtf8(parts[6])
+    const seq = parseInt(parts[7], 10)
+    const seed = parseInt(parts[8], 10)
+    const data = b64ToBytes(parts.slice(9).join("|"))
+    if(!ingestFountainSymbol(fileId, k, r, seq, seed, data)) return false
+    rxMeta = { name, type, size }
+    return true
+  }
+  if(text.startsWith("PC6|")){
+    const parts = text.split("|")
+    if(parts.length < 7) return false
+    const fileId = parts[1]
+    const k = parseInt(parts[2], 10)
+    const r = parseInt(parts[3], 10)
+    const seq = parseInt(parts[4], 10)
+    const seed = parseInt(parts[5], 10)
+    const data = b64ToBytes(parts.slice(6).join("|"))
+    return ingestFountainSymbol(fileId, k, r, seq, seed, data)
+  }
   if(!(text.startsWith("PC5M|") || text.startsWith("PC5D|"))) return false
   const parts = text.split("|")
   if(parts[0] === "PC5M"){
@@ -515,7 +938,59 @@ function ingestPayloadText(text){
   return false
 }
 
+function countUniqueSources(){
+  if(rxK == null) return 0
+  let n = 0
+  for(let i = 0; i < rxK; i++) if(rxSymbols.has(i)) n++
+  return n
+}
+
+function fountainDecodeReady(){
+  if(!rxFountain || rxK == null) return false
+  if(countUniqueSources() >= rxK) return true
+  const sent = rxK * FOUNTAIN_SOURCE_COPIES + (rxR || 0)
+  const decodedFrames = rxDecodeCount
+  if(decodedFrames < Math.ceil(sent * 0.75)) return false
+  return rxSymbols.size >= rxK
+}
+
+function tryFinishFountain(){
+  if(!fountainDecodeReady()) return false
+  const k = rxK
+  let sources = null
+  let haveAllDirect = true
+  const direct = new Array(k)
+  for(let i = 0; i < k; i++){
+    const s = rxSymbols.get(i)
+    if(s) direct[i] = s.data
+    else haveAllDirect = false
+  }
+  if(haveAllDirect) sources = direct
+  else{
+    sources = ltDecodePeel(k, rxSymbols)
+    if(!sources) return false
+  }
+  if(!rxMeta) rxMeta = { name: "recovered_file", type: "application/octet-stream", size: null }
+  const merged = new Uint8Array(rxK * SYMBOL_SIZE)
+  for(let i = 0; i < rxK; i++) merged.set(sources[i], i * SYMBOL_SIZE)
+  const finalBytes = rxMeta.size != null ? merged.slice(0, rxMeta.size) : merged
+  const blob = new Blob([finalBytes], { type: rxMeta.type || "application/octet-stream" })
+  const url = URL.createObjectURL(blob)
+  downloadLink.href = url
+  downloadLink.download = rxMeta.name || "recovered_file"
+  downloadLink.hidden = false
+  progressBar.style.width = "100%"
+  progressText.textContent = "Done"
+  setStatus(
+    `Recovered “${downloadLink.download}” (${finalBytes.length} bytes) · ${rxDecodeCount} frames decoded.`
+  )
+  try{ downloadLink.click() }catch(_){}
+  decodeRunning = false
+  return true
+}
+
 function tryFinish(){
+  if(rxFountain) return tryFinishFountain()
   if(rxTotal == null || rxHave.size < rxTotal) return false
   if(!rxMeta) rxMeta = { name: "recovered_file", type: "application/octet-stream", size: null }
   const parts = []
@@ -545,7 +1020,6 @@ function tryFinish(){
 
 function bitsToPayload(bits){
   if(!bits || bits.length < SYNC.length + 16) return null
-  // Find sync
   let start = -1
   for(let i = 0; i <= bits.length - SYNC.length; i++){
     let ok = 0
@@ -554,81 +1028,62 @@ function bitsToPayload(bits){
   }
   if(start < 0) return null
   const bodyBits = bits.slice(start + SYNC.length)
-  const body = bitsToBytes(bodyBits)
-  if(body.length < 5) return null
-  const raw = body.subarray(0, body.length - 4)
-  const crc =
-    ((body[body.length - 4] << 24) |
-      (body[body.length - 3] << 16) |
-      (body[body.length - 2] << 8) |
-      body[body.length - 1]) >>> 0
-  if(crc32(raw) !== crc) return null
-  try{
-    return new TextDecoder().decode(raw)
-  }catch(_){
-    return null
+  const maxBytes = Math.min(520, (bodyBits.length / 8) | 0)
+  // Frame bits are zero-padded to DATA_COUNT; scan body lengths until CRC matches.
+  for(let blen = 8; blen <= maxBytes; blen++){
+    const body = bitsToBytes(bodyBits.slice(0, blen * 8))
+    if(body.length < 5) continue
+    const raw = body.subarray(0, body.length - 4)
+    const crc =
+      ((body[body.length - 4] << 24) |
+        (body[body.length - 3] << 16) |
+        (body[body.length - 2] << 8) |
+        body[body.length - 1]) >>> 0
+    if(crc32(raw) !== crc) continue
+    try{
+      const text = new TextDecoder().decode(raw)
+      if(text.startsWith("PC6M|") || text.startsWith("PC6|")) return text
+      if(text.startsWith("PC5M|") || text.startsWith("PC5D|")) return text
+    }catch(_){}
   }
+  return null
 }
 
-function sampleCloudBitsFromVideo(){
-  // Orthographic-ish sample of fibonacci directions projected to a disk in frame center.
-  const vw = video.videoWidth, vh = video.videoHeight
-  if(!vw || !vh) return null
-  const side = Math.min(vw, vh)
-  const sx = ((vw - side) / 2) | 0
-  const sy = ((vh - side) / 2) | 0
-  const scan = sampleCloudBitsFromVideo._c || (sampleCloudBitsFromVideo._c = document.createElement("canvas"))
-  const S = 256
-  scan.width = S
-  scan.height = S
-  const c = scan.getContext("2d", { willReadFrequently: true })
-  c.drawImage(video, sx, sy, side, side, 0, 0, S, S)
-  const img = c.getImageData(0, 0, S, S)
-  const data = img.data
-
-  // Collect blue-ish luminance samples for data particles
-  const vals = new Float32Array(DATA_COUNT)
-  if(!particleDirs) return null
-  for(let b = 0; b < DATA_COUNT; b++){
-    const i = DATA_INDICES[b]
-    const x = particleDirs[i * 3]
-    const y = particleDirs[i * 3 + 1]
-    const z = particleDirs[i * 3 + 2]
-    const depth = z + 1.4
-    const px = (x / depth) * 0.92
-    const py = (y / depth) * 0.92
-    const ix = ((px * 0.5 + 0.5) * (S - 1)) | 0
-    const iy = ((-py * 0.5 + 0.5) * (S - 1)) | 0
-    if(ix < 1 || iy < 1 || ix >= S - 1 || iy >= S - 1){
-      vals[b] = 0
-      continue
-    }
-    let acc = 0, n = 0
-    for(let dy = -1; dy <= 1; dy++){
-      for(let dx = -1; dx <= 1; dx++){
-        const p = ((iy + dy) * S + (ix + dx)) * 4
-        const bb = data[p + 2], g = data[p + 1], r8 = data[p]
-        acc += bb * 0.55 + g * 0.3 + r8 * 0.15
-        n++
-      }
-    }
-    vals[b] = acc / n
+async function tuneDecoderCamera(stream){
+  const track = stream.getVideoTracks()[0]
+  if(!track) return {}
+  const caps = typeof track.getCapabilities === "function" ? track.getCapabilities() : {}
+  const advanced = {}
+  const focusModes = caps.focusMode
+  if(Array.isArray(focusModes) && focusModes.includes("continuous")) advanced.focusMode = "continuous"
+  const exposureModes = caps.exposureMode
+  if(Array.isArray(exposureModes) && exposureModes.includes("continuous")) advanced.exposureMode = "continuous"
+  const wbModes = caps.whiteBalanceMode
+  if(Array.isArray(wbModes) && wbModes.includes("continuous")) advanced.whiteBalanceMode = "continuous"
+  if(Object.keys(advanced).length){
+    try{ await track.applyConstraints({ advanced: [advanced] }) }catch(_){}
   }
-
-  // Adaptive threshold
-  let sum = 0
-  for(let i = 0; i < DATA_COUNT; i++) sum += vals[i]
-  const mean = sum / DATA_COUNT
-  let varSum = 0
-  for(let i = 0; i < DATA_COUNT; i++){
-    const d = vals[i] - mean
-    varSum += d * d
+  // Safari on iPhone often caps at ~30 fps; asking for 60 is harmless if ignored.
+  try{
+    await track.applyConstraints({ frameRate: { ideal: 60, max: 60 } })
+  }catch(_){
+    try{ await track.applyConstraints({ frameRate: { ideal: 30 } }) }catch(__){}
   }
-  const std = Math.sqrt(varSum / DATA_COUNT)
-  const thr = mean + std * 0.15
-  let bits = ""
-  for(let i = 0; i < DATA_COUNT; i++) bits += vals[i] > thr ? "1" : "0"
-  return bits
+  try{
+    await track.applyConstraints({
+      width: { ideal: 1920 },
+      height: { ideal: 1080 },
+      facingMode: { ideal: "environment" }
+    })
+  }catch(_){}
+  return typeof track.getSettings === "function" ? track.getSettings() : {}
+}
+
+function formatCaptureLabel(settings, vw, vh){
+  const w = settings.width || vw || 0
+  const h = settings.height || vh || 0
+  const fps = settings.frameRate != null ? settings.frameRate.toFixed(0) : "?"
+  return `${w}×${h} @ ~${fps} fps`
 }
 
 async function startDecoder(){
@@ -639,22 +1094,41 @@ async function startDecoder(){
   videoWrap.hidden = false
   progressWrap.hidden = false
   downloadLink.hidden = true
-  rxChunks = new Map()
-  rxHave = new Set()
-  rxTotal = null
-  rxFileId = null
-  rxMeta = null
+  resetRxState()
+  resetDecodeAccum()
+  decodeAlignLocked = false
+  decodeAlignMiss = 0
+  decodeFrameNo = 0
   progressBar.style.width = "0%"
   progressText.textContent = "Frames: 0"
 
+  let captureSettings = {}
   try{
     const stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } }
+      video: {
+        facingMode: { ideal: "environment" },
+        width: { ideal: 1920, min: 1280 },
+        height: { ideal: 1080, min: 720 },
+        frameRate: { ideal: 60, max: 60 }
+      },
+      audio: false
     })
     video.srcObject = stream
+    await video.play().catch(() => {})
+    captureSettings = await tuneDecoderCamera(stream)
   }catch(_){
-    setStatus("Could not access camera.")
-    return
+    try{
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "environment" },
+        audio: false
+      })
+      video.srcObject = stream
+      await video.play().catch(() => {})
+      captureSettings = await tuneDecoderCamera(stream)
+    }catch(__){
+      setStatus("Could not access camera.")
+      return
+    }
   }
 
   if("BarcodeDetector" in window){
@@ -662,16 +1136,38 @@ async function startDecoder(){
   }
 
   decodeRunning = true
-  setStatus("Point the camera at the glowing particle cloud. Keep it centered and steady.")
+  const showCaptureStatus = () => {
+    const capLabel = formatCaptureLabel(captureSettings, video.videoWidth, video.videoHeight)
+    setStatus(`Point at the cloud · fill view with screen · cyan corners visible · ${capLabel}. Tilt to kill glare.`)
+  }
+  showCaptureStatus()
+  video.addEventListener("loadedmetadata", () => {
+    captureSettings = { ...captureSettings, width: video.videoWidth, height: video.videoHeight }
+    showCaptureStatus()
+  }, { once: true })
   decodeLoop()
 }
 
 async function decodeLoop(){
   if(!decodeRunning) return
-  const have = rxHave.size
-  const need = rxTotal || "?"
-  progressText.textContent = `Frames decoded: ${have} / ${need}`
-  if(rxTotal) progressBar.style.width = Math.min(100, Math.floor((have / rxTotal) * 100)) + "%"
+  decodeFrameNo++
+  const have = rxFountain ? rxDecodeCount : rxHave.size
+  const need = rxFountain
+    ? (rxK != null
+      ? `${countUniqueSources()}/${rxK} sources`
+      : "?")
+    : (rxTotal || "?")
+  const alignHint = decodeAlignLocked ? " · corners locked" : decodeAlignMiss > 8 ? " · find cyan corners" : " · align corners"
+  progressText.textContent = rxFountain
+    ? `Fountain: ${rxDecodeCount} OK · ${need}${alignHint}`
+    : `Frames decoded: ${have} / ${need}${alignHint}`
+  if(rxFountain && rxK){
+    const sent = rxK * FOUNTAIN_SOURCE_COPIES + (rxR || 0)
+    const pct = Math.min(100, Math.floor((rxDecodeCount / Math.ceil(sent * 0.8)) * 100))
+    progressBar.style.width = pct + "%"
+  }else if(rxTotal){
+    progressBar.style.width = Math.min(100, Math.floor((have / rxTotal) * 100)) + "%"
+  }
 
   // Primary: sample cloud bits
   if(video.videoWidth){
@@ -679,14 +1175,20 @@ async function decodeLoop(){
     if(bits){
       const text = bitsToPayload(bits)
       if(text && ingestPayloadText(text)){
-        setStatus(`Locked cloud signal · ${rxHave.size}${rxTotal ? " / " + rxTotal : ""} frames`)
+        resetDecodeAccum()
+        const prog = rxFountain
+          ? `${rxSymbols.size} symbols · peeling…`
+          : `${rxHave.size}${rxTotal ? " / " + rxTotal : ""} frames`
+        setStatus(`Locked cloud signal · ${prog}`)
+        if(tryFinish()) return
+      }else if(rxFountain && rxSymbols.size >= (rxK || 0)){
         if(tryFinish()) return
       }
     }
   }
 
   // Optional: if a QR ever appears in view, accept PC5 payloads too
-  if(detector && video.videoWidth){
+  if(detector && video.videoWidth && decodeFrameNo % 24 === 0){
     try{
       const codes = await detector.detect(video)
       for(const c of codes){
