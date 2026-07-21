@@ -47,8 +47,8 @@ function setStatus(msg){
 const PARTICLE_COUNT = 8000
 const BIT_REPS = 1
 const GRID_W = 32
-const GRID_H = 22
-const DATA_COUNT = GRID_W * GRID_H // 704 bits — fits PC6M (~688) with larger cells in the top band
+const GRID_H = 32
+const DATA_COUNT = GRID_W * GRID_H // 1024 bits/frame — fills the full align square
 const PHYS_COUNT = DATA_COUNT * BIT_REPS
 const FRAME_HOLD_MS = 1800
 const FRAME_BLEND_MS = 0
@@ -56,9 +56,7 @@ const SYMBOL_SIZE = 16
 
 // Cyan L-brackets sit at this inset (CSS %). Sample UVs are relative to that frame.
 const ALIGN_MARKER_UV = 0.04
-const SAMPLE_INSET = 0.05
-// Keep payload out of the bottom glare band (phone reflection on glossy screens).
-const GRID_V_MAX = 0.62
+const SAMPLE_INSET = 0.06
 
 const SYNC = "11001100111100001010101011001100" // 32-bit
 
@@ -217,9 +215,9 @@ const DATA_INDICES = (() => {
   for(let b = 0; b < PHYS_COUNT; b++){
     const gx = b % GRID_W
     const gy = (b / GRID_W) | 0
-    // Regular grid in align-marker space — only the top GRID_V_MAX band (avoid bottom glare).
+    // Regular grid filling the full align-marker square (with a small edge inset).
     const uAlign = inset + ((gx + 0.5) / GRID_W) * (1 - inset * 2)
-    const vAlign = inset + ((gy + 0.5) / GRID_H) * (GRID_V_MAX - inset)
+    const vAlign = inset + ((gy + 0.5) / GRID_H) * (1 - inset * 2)
     const uCanvas = m + uAlign * (1 - 2 * m)
     const vCanvas = m + vAlign * (1 - 2 * m)
     // Place on plane so screen UV matches (camera looks down -Z, no pitch).
