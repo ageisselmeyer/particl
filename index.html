@@ -9,19 +9,11 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>PartiCl</title>
 <link rel="stylesheet" href="styles.css">
-<script type="importmap">
-{
-  "imports": {
-    "three": "./vendor/three/three.module.js",
-    "three/addons/": "./vendor/three/addons/"
-  }
-}
-</script>
 </head>
 <body>
   <header>
     <h1>PartiCl</h1>
-    <p class="tagline">Particle cloud transfer · <span id="buildId">153100</span></p>
+    <p class="tagline">QR transfer mode · <span id="buildId">154000</span></p>
   </header>
 
   <input type="file" id="fileInput" hidden>
@@ -31,8 +23,9 @@
     <button type="button" id="btnDecode">Decode</button>
   </div>
 
-  <div id="canvasWrap">
-    <canvas id="cloud"></canvas>
+  <div id="canvasWrap" class="tx-paper">
+    <canvas id="cloud" hidden></canvas>
+    <canvas id="qrCanvas" aria-label="QR code frame"></canvas>
     <div id="alignFrame" aria-hidden="true">
       <span class="align-mark align-tl"></span>
       <span class="align-mark align-tr"></span>
@@ -70,8 +63,8 @@
     </div>
     <div class="meterRow">
       <div class="meterHead">
-        <span class="meterLabel">SYNC match</span>
-        <span class="meterValue" id="meterSyncVal">0/32</span>
+        <span class="meterLabel">QR lock</span>
+        <span class="meterValue" id="meterSyncVal">waiting</span>
       </div>
       <div class="meterTrack">
         <div class="meterFill meterFillSync" id="meterSyncFill"></div>
@@ -80,14 +73,14 @@
     </div>
     <div class="meterRow">
       <div class="meterHead">
-        <span class="meterLabel">Signal contrast</span>
-        <span class="meterValue" id="meterContrastVal">0</span>
+        <span class="meterLabel">Decoder</span>
+        <span class="meterValue" id="meterContrastVal">—</span>
       </div>
       <div class="meterTrack"><div class="meterFill" id="meterContrastFill"></div></div>
     </div>
     <div class="meterRow">
       <div class="meterHead">
-        <span class="meterLabel">CRC / payload</span>
+        <span class="meterLabel">Payload</span>
         <span class="meterValue" id="meterCrcVal">searching</span>
       </div>
       <div class="meterTrack">
@@ -97,6 +90,8 @@
     </div>
   </div>
 
-  <script type="module" src="app.js?v=153100"></script>
+  <script src="vendor/qrcode/qrcode.js"></script>
+  <script src="vendor/jsqr/jsQR.js"></script>
+  <script type="module" src="app-qr.js?v=154000"></script>
 </body>
 </html>

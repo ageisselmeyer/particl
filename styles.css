@@ -92,6 +92,14 @@ button:active{ transform:translateY(0); }
   touch-action:none;
 }
 
+#qrCanvas{
+  display:block;
+  width:100%;
+  height:100%;
+  touch-action:none;
+  background:#fff;
+}
+
 #alignFrame{
   pointer-events:none;
   position:absolute;
