@@ -51,7 +51,7 @@ const GRID_H = 32
 const DATA_COUNT = GRID_W * GRID_H // 1024 bits/frame — fills the full align square
 const PHYS_COUNT = DATA_COUNT * BIT_REPS
 const ALIGN_MARKER_UV = 0.04
-const SAMPLE_INSET = 0.09
+const SAMPLE_INSET = 0.07
 const FRAME_HOLD_MS = 2200
 const FRAME_BLEND_MS = 0
 const SYMBOL_SIZE = 16
@@ -369,10 +369,10 @@ void main(){
   vec4 mv = modelViewMatrix * vec4(pos, 1.0);
   vDepth = -mv.z;
 
-  float size = mix(2.2, mix(4.8, mix(14.0, 8.5, uPaper), uEncode * aData), aSignal) * mix(0.65, 1.05, aFill);
+  float size = mix(2.2, mix(4.8, mix(14.0, 13.5, uPaper), uEncode * aData), aSignal) * mix(0.65, 1.05, aFill);
   size *= mix(0.75, 1.15, aRadius);
-  // Paper dots must stay inside their cell (~15px pitch on a 560px square) or blur merges bits.
-  float sizeCap = mix(9.0, mix(20.0, 11.0, uPaper), uEncode * aData);
+  // ~0.7–0.8 of cell pitch: thick enough for phone AF, not a full neighbor merge.
+  float sizeCap = mix(9.0, mix(20.0, 18.0, uPaper), uEncode * aData);
   gl_PointSize = clamp(size * (220.0 / max(50.0, -mv.z)), 1.5, sizeCap);
 
   // Flat data bits: uniform brightness (sphere-facing term made the lower grid look dead).
@@ -403,10 +403,10 @@ void main(){
   float mid = exp(-d * 2.2);
   float edge = smoothstep(1.0, 0.35, r);
 
-  // White-paper TX: crisp black ink discs; zeros leave paper blank.
+  // White-paper TX: solid black discs (thick enough for phone cameras).
   if(uPaper > 0.5){
-    float ink = smoothstep(0.55, 0.2, r) * smoothstep(0.35, 0.8, vSignal);
-    if(ink < 0.05) discard;
+    float ink = smoothstep(0.92, 0.35, r) * smoothstep(0.3, 0.75, vSignal);
+    if(ink < 0.04) discard;
     gl_FragColor = vec4(0.0, 0.0, 0.0, ink);
     return;
   }
