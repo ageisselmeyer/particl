@@ -42,14 +42,16 @@ function setStatus(msg){
   statusEl.textContent = msg || ""
 }
 
-// Larger symbols than the particle path — QR carries more payload per frame.
-const SYMBOL_SIZE = 96
-const FRAME_HOLD_MS = 1200
+// Smaller symbols → lower QR version → more reliable phone decode.
+const SYMBOL_SIZE = 56
+const FRAME_HOLD_MS = 1600
 // Fountain: 1 systematic pass + repair so any ~k unique QRs can finish (misses OK).
 const FOUNTAIN_SOURCE_COPIES = 1
 const FOUNTAIN_REPAIR_BASE = 1.0 // as many repair as source → tolerate ~40–50% misses
-const QR_ECC = "M"
+const QR_ECC = "Q" // stronger ECC — phone cameras blur dense modules
 const QR_PIXEL = 1024
+const QR_CELL = 10
+const QR_MARGIN = 8 // quiet zone in modules — keep finders clear of the box edge
 
 let frames = [] // string payloads
 let frameIndex = 0
@@ -245,8 +247,7 @@ function drawQrToCanvas(text){
   qr.addData(String(text), "Byte")
   qr.make()
   if(!qrImg) throw new Error("qrImg missing from DOM")
-  // cell size 8, margin 4 modules — crisp on Retina when scaled with object-fit
-  qrImg.src = qr.createDataURL(8, 4)
+  qrImg.src = qr.createDataURL(QR_CELL, QR_MARGIN)
   qrImg.hidden = false
   qrImg.style.display = "block"
 }
@@ -254,6 +255,9 @@ function drawQrToCanvas(text){
 function showQrUi(){
   if(cloudCanvas) cloudCanvas.hidden = true
   if(qrImg) qrImg.hidden = false
+  // Cyan corner marks sit on QR finders and break camera decode — keep them off.
+  const align = document.getElementById("alignFrame")
+  if(align) align.hidden = true
   canvasWrap.classList.add("tx-paper")
   canvasWrap.style.display = ""
   videoWrap.hidden = true
@@ -291,7 +295,8 @@ function buildFrames(fileBytes, fileMeta){
   const out = []
   for(let pi = 0; pi < packets.length; pi++){
     const p = packets[pi]
-    const includeMeta = pi === 0 || pi % 6 === 0 || pi === packets.length - 1
+    // Meta only on first/last — PC6M is denser and was harder for the phone to lock.
+    const includeMeta = pi === 0 || pi === packets.length - 1
     let payload
     if(includeMeta){
       payload = [
@@ -649,16 +654,16 @@ function ensureScanCanvas(w, h){
     scanCanvas = document.createElement("canvas")
     scanCtx = scanCanvas.getContext("2d", { willReadFrequently: true })
   }
-  // Downscale for jsQR speed on phone
-  const maxW = 720
-  const scale = Math.min(1, maxW / w)
-  const sw = Math.max(1, (w * scale) | 0)
-  const sh = Math.max(1, (h * scale) | 0)
-  if(scanCanvas.width !== sw || scanCanvas.height !== sh){
-    scanCanvas.width = sw
-    scanCanvas.height = sh
+  if(scanCanvas.width !== w || scanCanvas.height !== h){
+    scanCanvas.width = w
+    scanCanvas.height = h
   }
-  return { sw, sh }
+  return { sw: w, sh: h }
+}
+
+function tryJsQROnImageData(jsQR, img, w, h){
+  const code = jsQR(img.data, w, h, { inversionAttempts: "attemptBoth" })
+  return code && code.data ? code.data : null
 }
 
 async function scanQrFromVideo(){
@@ -675,18 +680,33 @@ async function scanQrFromVideo(){
     }catch(_){}
   }
 
-  // jsQR fallback
+  // jsQR: try a few scales / a center crop — dense QRs fail more often at one resolution
   const jsQR = getJsQR()
   if(jsQR){
     const w = video.videoWidth
     const h = video.videoHeight
-    const { sw, sh } = ensureScanCanvas(w, h)
-    scanCtx.drawImage(video, 0, 0, sw, sh)
-    const img = scanCtx.getImageData(0, 0, sw, sh)
-    const code = jsQR(img.data, sw, sh, { inversionAttempts: "attemptBoth" })
-    if(code && code.data){
-      decodeDbg.engine = "jsQR"
-      return code.data
+    const attempts = [
+      { max: 640, crop: 1 },
+      { max: 960, crop: 1 },
+      { max: 720, crop: 0.78 } // center square-ish crop
+    ]
+    // Rotate which attempt we try first so we don't always burn the same path
+    const start = decodeFrameNo % attempts.length
+    for(let n = 0; n < attempts.length; n++){
+      const a = attempts[(start + n) % attempts.length]
+      const scale = Math.min(1, a.max / Math.max(w, h))
+      const cw = Math.max(1, (w * scale * a.crop) | 0)
+      const ch = Math.max(1, (h * scale * a.crop) | 0)
+      const sx = ((w - w * a.crop) / 2) | 0
+      const sy = ((h - h * a.crop) / 2) | 0
+      ensureScanCanvas(cw, ch)
+      scanCtx.drawImage(video, sx, sy, w * a.crop, h * a.crop, 0, 0, cw, ch)
+      const img = scanCtx.getImageData(0, 0, cw, ch)
+      const data = tryJsQROnImageData(jsQR, img, cw, ch)
+      if(data){
+        decodeDbg.engine = `jsQR@${cw}`
+        return data
+      }
     }
   }
 

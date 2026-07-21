@@ -13,7 +13,7 @@
 <body>
   <header>
     <h1>PartiCl</h1>
-    <p class="tagline">QR + fountain · <span id="buildId">154300</span></p>
+    <p class="tagline">QR + fountain · <span id="buildId">154400</span></p>
   </header>
 
   <input type="file" id="fileInput" hidden>
@@ -27,7 +27,7 @@
     <canvas id="cloud" hidden></canvas>
     <img id="qrImg" alt="QR code" width="1024" height="1024">
     <canvas id="qrCanvas" hidden aria-hidden="true"></canvas>
-    <div id="alignFrame" aria-hidden="true">
+    <div id="alignFrame" hidden aria-hidden="true">
       <span class="align-mark align-tl"></span>
       <span class="align-mark align-tr"></span>
       <span class="align-mark align-br"></span>
@@ -57,7 +57,7 @@
   <div id="decodeMeters" hidden aria-live="polite">
     <div class="meterRow">
       <div class="meterHead">
-        <span class="meterLabel">Align</span>
+        <span class="meterLabel">QR view</span>
         <span class="meterValue" id="meterAlignVal">0%</span>
       </div>
       <div class="meterTrack"><div class="meterFill" id="meterAlignFill"></div></div>
@@ -102,16 +102,16 @@
         return;
       }
       try{
-        var qr = qrcode(0, "M");
+        var qr = qrcode(0, "Q");
         qr.addData("PartiCl QR ready - Encode a file", "Byte");
         qr.make();
-        img.src = qr.createDataURL(8, 4);
+        img.src = qr.createDataURL(10, 8);
         img.hidden = false;
       }catch(e){
         console.error("PartiCl: classic QR draw failed", e);
       }
     })();
   </script>
-  <script type="module" src="app-qr.js?v=154300"></script>
+  <script type="module" src="app-qr.js?v=154400"></script>
 </body>
 </html>
