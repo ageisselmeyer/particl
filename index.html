@@ -13,7 +13,7 @@
 <body>
   <header>
     <h1>PartiCl</h1>
-    <p class="tagline">Dot QR · MDS · <span id="buildId">154700</span></p>
+    <p class="tagline">Dot QR · MDS · <span id="buildId">154710</span></p>
   </header>
 
   <input type="file" id="fileInput" hidden>
@@ -96,6 +96,7 @@
   <script src="vendor/zxing/zxing.min.js"></script>
   <script>
     // White square · square finder corners · black dots only inside a center circle.
+    // Optional window.__particlQrType (1–40) locks version so finders don't jump between frames.
     window.__particlPaintCloud = function(text){
       var c = document.getElementById("cloud");
       var wrap = document.getElementById("canvasWrap");
@@ -108,7 +109,9 @@
         wrap.style.borderRadius = "28px"; // square card (not a circle)
       }
       if(!c || typeof qrcode !== "function") return false;
-      var qr = qrcode(0, "Q");
+      var type = (window.__particlQrType | 0);
+      if(type < 1 || type > 40) type = 0; // 0 = auto
+      var qr = qrcode(type, "Q");
       qr.addData(String(text || "PartiCl"), "Byte");
       qr.make();
       var n = qr.getModuleCount();
@@ -171,6 +174,6 @@
     var st = document.getElementById("status");
     if(st) st.textContent = "Boot square + dot circle · loading module…";
   </script>
-  <script type="module" src="app-qr.js?v=154700"></script>
+  <script type="module" src="app-qr.js?v=154710"></script>
 </body>
 </html>

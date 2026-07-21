@@ -669,12 +669,14 @@ function encodeFile(file){
         size: bytes.length
       }
       frames = buildFrames(bytes, meta)
-      // Sanity: ensure QR can encode the longest packet
+      // Lock QR version to the longest frame so module grid / finders stay fixed
       const qrcode = getQrCode()
       const longest = frames.reduce((a, b) => (a.length >= b.length ? a : b), "")
       const probe = qrcode(0, QR_ECC)
       probe.addData(longest, "Byte")
       probe.make()
+      // typeNumber is private; derive from modules: n = 4*type + 17
+      window.__particlQrType = Math.round((probe.getModuleCount() - 17) / 4)
 
       frameIndex = 0
       phaseStartedAt = 0
@@ -1111,6 +1113,7 @@ function bootQr(){
     if(typeof (globalThis.qrcode || window.qrcode) !== "function"){
       throw new Error("vendor/qrcode/qrcode.js did not expose window.qrcode")
     }
+    window.__particlQrType = 0
     drawQrToCanvas("PartiCl QR ready - Encode a file")
     ensureRs().catch((e) => console.warn("RS preload failed", e))
     setStatus("QR · Encode a file — or Decode with the camera.")
