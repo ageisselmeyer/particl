@@ -111,19 +111,26 @@ export function rsDecode(codeword, nsym){
   }
   if(errPos.length !== L) return null
 
-  // Ω(x) = S(x)·C(x)  (truncated)
+  if(!forneyCorrect(msg, syn, C, errPos)) return null
+  if(syndromes(msg, nsym).err) return null
+  return msg.subarray(0, msg.length - nsym)
+}
+
+/** Forney magnitudes for known errata positions (errors or erasures). */
+function forneyCorrect(msg, syn, C, errPos){
+  const nsym = syn.length
+  const L = C.length - 1
+  const n = msg.length
   const omega = new Array(nsym).fill(0)
   for(let i = 0; i < nsym; i++){
     omega[i] = syn[i]
     for(let j = 1; j <= Math.min(i, L); j++) omega[i] ^= mul(C[j], syn[i - j])
   }
-
-  // Forney: y = Xi · Ω(Xi^{-1}) / C'(Xi^{-1})
   for(const pos of errPos){
     const Xi = pow2(n - 1 - pos)
     const XiInv = inv(Xi)
     let num = 0, p = 1
-    for(let i = 0; i < L; i++){
+    for(let i = 0; i < Math.min(L, nsym); i++){
       num ^= mul(omega[i], p)
       p = mul(p, XiInv)
     }
@@ -133,13 +140,40 @@ export function rsDecode(codeword, nsym){
       for(let k = 0; k < i - 1; k++) xp = mul(xp, XiInv)
       den ^= mul(C[i], xp)
     }
-    if(!den) return null
+    if(!den) return false
     msg[pos] ^= mul(Xi, div(num, den))
   }
-
-  if(syndromes(msg, nsym).err) return null
-  return msg.subarray(0, msg.length - nsym)
+  return true
 }
 
-/** Parity bytes per codeword — corrects up to 12 byte errors. */
+/**
+ * Decode with known erasure positions — recovers up to nsym missing bytes
+ * (MDS: any k of k+nsym systematically encoded symbols).
+ */
+export function rsDecodeErasures(codeword, nsym, erasePos){
+  if(!codeword || codeword.length <= nsym) return null
+  const msg = Uint8Array.from(codeword)
+  const n = msg.length
+  const erasures = [...new Set(erasePos)].filter(p => p >= 0 && p < n)
+  if(erasures.length > nsym) return null
+  for(const p of erasures) msg[p] = 0
+
+  const { syn, err } = syndromes(msg, nsym)
+  if(!err) return msg.subarray(0, n - nsym)
+  if(!erasures.length) return null
+
+  // Erasure locator Λ(x) = Π (1 + X_i x), X_i = α^{n-1-pos}
+  let C = new Uint8Array([1])
+  for(const pos of erasures){
+    const X = pow2(n - 1 - pos)
+    C = polyMul(C, new Uint8Array([1, X]))
+  }
+  if(C.length - 1 > nsym) return null
+
+  if(!forneyCorrect(msg, syn, Array.from(C), erasures)) return null
+  if(syndromes(msg, nsym).err) return null
+  return msg.subarray(0, n - nsym)
+}
+
+/** Parity bytes per codeword — corrects up to floor(nsym/2) unknown errors. */
 export const RS_NSYM = 24

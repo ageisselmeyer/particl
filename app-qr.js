@@ -1,7 +1,9 @@
 /**
- * PartiCl QR transfer mode — same UI + fountain packets, real QR encode/decode.
- * Particle codec lives in app.js for later; this path is for reliable E2E success.
+ * PartiCl QR transfer mode — MDS fountain (any k of n QRs recover).
+ * Particle codec lives in app.js for later.
  */
+import { rsEncode, rsDecodeErasures } from "./rs.js"
+
 const canvasWrap = document.getElementById("canvasWrap")
 const cloudCanvas = document.getElementById("cloud")
 const qrImg = document.getElementById("qrImg")
@@ -42,16 +44,15 @@ function setStatus(msg){
   statusEl.textContent = msg || ""
 }
 
-// Smaller symbols → lower QR version → more reliable phone decode.
-const SYMBOL_SIZE = 56
-const FRAME_HOLD_MS = 1600
-// Fountain: 1 systematic pass + repair so any ~k unique QRs can finish (misses OK).
-const FOUNTAIN_SOURCE_COPIES = 1
-const FOUNTAIN_REPAIR_BASE = 1.0 // as many repair as source → tolerate ~40–50% misses
-const QR_ECC = "Q" // stronger ECC — phone cameras blur dense modules
-const QR_PIXEL = 1024
+// ~2KB file → 20 QR frames, any 10 recover (Reed–Solomon MDS across packets).
+const TARGET_K = 10
+const TARGET_N = 20
+const MAX_SYMBOL_BYTES = 220
+const FRAME_HOLD_MS = 1500
+const QR_ECC = "Q"
 const QR_CELL = 10
-const QR_MARGIN = 8 // quiet zone in modules — keep finders clear of the box edge
+const QR_MARGIN = 8
+
 
 let frames = [] // string payloads
 let frameIndex = 0
@@ -263,68 +264,99 @@ function showQrUi(){
   videoWrap.hidden = true
 }
 
+function planCoding(fileLen){
+  let k = TARGET_K
+  let n = TARGET_N
+  let sym = Math.max(1, Math.ceil(fileLen / k))
+  while(sym > MAX_SYMBOL_BYTES){
+    k += 1
+    n = k * 2
+    sym = Math.max(1, Math.ceil(fileLen / k))
+  }
+  return { k, n, sym, nsym: n - k }
+}
+
+/** Per-byte-column RS: n packets, any k recover the k source blocks. */
+function encodeRsPackets(sources, n){
+  const k = sources.length
+  const nsym = n - k
+  const symLen = sources[0].length
+  const packets = Array.from({ length: n }, () => new Uint8Array(symLen))
+  for(let b = 0; b < symLen; b++){
+    const col = new Uint8Array(k)
+    for(let j = 0; j < k; j++) col[j] = sources[j][b]
+    const cw = rsEncode(col, nsym)
+    for(let i = 0; i < n; i++) packets[i][b] = cw[i]
+  }
+  return packets
+}
+
+function decodeRsPackets(symbolMap, k, n, symLen){
+  if(symbolMap.size < k) return null
+  const nsym = n - k
+  const erase = []
+  for(let i = 0; i < n; i++) if(!symbolMap.has(i)) erase.push(i)
+  if(erase.length > nsym) return null
+  const sources = Array.from({ length: k }, () => new Uint8Array(symLen))
+  for(let b = 0; b < symLen; b++){
+    const cw = new Uint8Array(n)
+    for(let i = 0; i < n; i++){
+      const s = symbolMap.get(i)
+      cw[i] = s ? s[b] : 0
+    }
+    const col = rsDecodeErasures(cw, nsym, erase)
+    if(!col || col.length !== k) return null
+    for(let j = 0; j < k; j++) sources[j][b] = col[j]
+  }
+  return sources
+}
+
 function buildFrames(fileBytes, fileMeta){
   const fileId = (crypto.getRandomValues(new Uint32Array(1))[0] >>> 0).toString(36)
-  const k = Math.max(1, Math.ceil(fileBytes.length / SYMBOL_SIZE))
-  const padded = new Uint8Array(k * SYMBOL_SIZE)
+  const { k, n, sym } = planCoding(fileBytes.length)
+  const padded = new Uint8Array(k * sym)
   padded.set(fileBytes)
   const sources = []
-  for(let i = 0; i < k; i++){
-    sources.push(padded.subarray(i * SYMBOL_SIZE, (i + 1) * SYMBOL_SIZE))
-  }
-  const r = Math.max(3, Math.ceil(k * FOUNTAIN_REPAIR_BASE))
+  for(let i = 0; i < k; i++) sources.push(padded.subarray(i * sym, (i + 1) * sym))
+  const packetData = encodeRsPackets(sources, n)
 
-  const packets = []
-  for(let copy = 0; copy < FOUNTAIN_SOURCE_COPIES; copy++){
-    for(let i = 0; i < k; i++){
-      packets.push({ seq: i, seed: 0, data: sources[i].slice() })
-    }
-  }
-  for(let j = 0; j < r; j++){
-    const seed = fileIdSeed(fileId, j)
-    const indices = ltIndices(k, seed)
-    const data = new Uint8Array(SYMBOL_SIZE)
-    for(const idx of indices) xorBytes(data, sources[idx])
-    packets.push({ seq: k + j, seed, data })
-  }
-  for(let i = packets.length - 1; i > 0; i--){
+  const order = Array.from({ length: n }, (_, i) => i)
+  for(let i = order.length - 1; i > 0; i--){
     const j = Math.floor(hash01(i, 91) * (i + 1))
-    const t = packets[i]; packets[i] = packets[j]; packets[j] = t
+    const t = order[i]; order[i] = order[j]; order[j] = t
   }
 
   const out = []
-  for(let pi = 0; pi < packets.length; pi++){
-    const p = packets[pi]
-    // Meta only on first/last — PC6M is denser and was harder for the phone to lock.
-    const includeMeta = pi === 0 || pi === packets.length - 1
+  for(let pi = 0; pi < order.length; pi++){
+    const seq = order[pi]
+    const includeMeta = pi === 0 || pi === order.length - 1
+    const dataB64 = bytesToB64(packetData[seq])
     let payload
     if(includeMeta){
       payload = [
-        "PC6M",
+        "PC7M",
         fileId,
         String(k),
-        String(r),
+        String(n),
         String(fileMeta.size >>> 0),
         utf8ToB64(fileMeta.name || "file"),
         utf8ToB64(fileMeta.type || "application/octet-stream"),
-        String(p.seq),
-        String(p.seed >>> 0),
-        bytesToB64(p.data)
+        String(seq),
+        dataB64
       ].join("|")
     }else{
       payload = [
-        "PC6",
+        "PC7",
         fileId,
         String(k),
-        String(r),
-        String(p.seq),
-        String(p.seed >>> 0),
-        bytesToB64(p.data)
+        String(n),
+        String(seq),
+        dataB64
       ].join("|")
     }
     out.push(payload)
   }
-  out._fountain = { k, r, copies: FOUNTAIN_SOURCE_COPIES, total: packets.length }
+  out._fountain = { k, n, r: n - k, sym, total: n, need: k }
   return out
 }
 
@@ -362,8 +394,8 @@ function encodeFile(file){
       txRaf = requestAnimationFrame(loop)
       const ft = frames._fountain || {}
       setStatus(
-        `Fountain QR · “${meta.name}” · ${frames.length} frames ` +
-        `(need any ~${ft.k} unique of ${ft.k}+${ft.r}) · point camera here`
+        `MDS QR · “${meta.name}” · ${frames.length} frames · ` +
+        `need any ${ft.need} of ${ft.total} · point camera here`
       )
     }catch(err){
       console.error(err)
@@ -398,7 +430,9 @@ let rxFileId = null
 let rxMeta = null
 let rxFountain = false
 let rxK = null
+let rxN = null
 let rxR = null
+let rxSymLen = null
 let rxSymbols = new Map()
 let rxDecodeCount = 0
 let rxPayloadOk = false
@@ -468,11 +502,10 @@ function updateDecodeMeters(){
   let crcLabel = "waiting"
   if(rxRecovered || rxPayloadOk){
     const need = Math.max(1, rxK || 1)
-    const have = Math.max(countUniqueSources(), Math.min(rxSymbols.size, need))
-    crcScore = rxRecovered ? 100 : Math.min(95, Math.round((have / need) * 95))
+    crcScore = rxRecovered ? 100 : Math.min(95, Math.round((rxSymbols.size / need) * 95))
     crcLabel = rxRecovered
       ? "recovered"
-      : `fountain ${rxSymbols.size} unique · need ~${rxK}`
+      : `${rxSymbols.size}/${rxK} of ${rxN ?? "?"}`
   }
   decodeQuality.crcScore = crcScore
   if(crcScore > decodeQuality.crcPeak) decodeQuality.crcPeak = crcScore
@@ -489,7 +522,7 @@ function updateDecodeDebug(){
   decodeDebugEl.textContent = [
     `frame ${decodeFrameNo} · ${decodeDbg.video} · ~${decodeDbg.fps} fps`,
     `engine ${decodeDbg.engine} · hits ${decodeDbg.hits} · streak ${qrHitStreak}`,
-    `fountain unique=${rxSymbols.size} sources=${countUniqueSources()}/${rxK ?? "?"} · scans=${rxDecodeCount}`,
+    `mds unique=${rxSymbols.size}/${rxN ?? "?"} · need ${rxK ?? "?"} · scans=${rxDecodeCount}`,
     `last: ${decodeDbg.last}`
   ].join("\n")
 }
@@ -502,7 +535,9 @@ function resetRxState(){
   rxMeta = null
   rxFountain = false
   rxK = null
+  rxN = null
   rxR = null
+  rxSymLen = null
   rxSymbols = new Map()
   rxDecodeCount = 0
   rxPayloadOk = false
@@ -512,88 +547,68 @@ function resetRxState(){
   qrMissStreak = 0
 }
 
-function ingestFountainSymbol(fileId, k, r, seq, seed, data){
-  if(!Number.isFinite(k) || !Number.isFinite(r) || k < 1 || r < 0) return false
-  if(!Number.isFinite(seq) || seq < 0 || seq >= k + r) return false
+function ingestMdsSymbol(fileId, k, n, seq, data){
+  if(!Number.isFinite(k) || !Number.isFinite(n) || k < 1 || n < k) return false
+  if(!Number.isFinite(seq) || seq < 0 || seq >= n) return false
+  if(!data || !data.length) return false
   if(rxFileId == null) rxFileId = fileId
   if(fileId !== rxFileId) return false
+  if(rxSymLen != null && data.length !== rxSymLen) return false
   rxFountain = true
   rxK = k
-  rxR = r
+  rxN = n
+  rxR = n - k
   rxTotal = k
+  rxSymLen = data.length
   rxDecodeCount++
   if(rxSymbols.has(seq)) return true
-  const sym = new Uint8Array(SYMBOL_SIZE)
-  sym.set(data.subarray(0, Math.min(SYMBOL_SIZE, data.length)))
-  const indices = seq < k ? [seq] : ltIndices(k, seed >>> 0)
-  rxSymbols.set(seq, { data: sym, seed: seed >>> 0, indices })
+  rxSymbols.set(seq, Uint8Array.from(data))
   rxHave.add(seq)
   return true
 }
 
 function ingestPayloadText(text){
   if(!text || typeof text !== "string") return false
-  if(text.startsWith("PC6M|")){
+  if(text.startsWith("PC7M|")){
     const parts = text.split("|")
-    if(parts.length < 10) return false
+    if(parts.length < 9) return false
     const fileId = parts[1]
     const k = parseInt(parts[2], 10)
-    const r = parseInt(parts[3], 10)
+    const n = parseInt(parts[3], 10)
     const size = parseInt(parts[4], 10)
     const name = b64ToUtf8(parts[5])
     const type = b64ToUtf8(parts[6])
     const seq = parseInt(parts[7], 10)
-    const seed = parseInt(parts[8], 10)
-    const data = b64ToBytes(parts.slice(9).join("|"))
-    if(!ingestFountainSymbol(fileId, k, r, seq, seed, data)) return false
+    const data = b64ToBytes(parts.slice(8).join("|"))
+    if(!ingestMdsSymbol(fileId, k, n, seq, data)) return false
     rxMeta = { name, type, size }
     return true
   }
-  if(text.startsWith("PC6|")){
+  if(text.startsWith("PC7|")){
     const parts = text.split("|")
-    if(parts.length < 7) return false
+    if(parts.length < 6) return false
     const fileId = parts[1]
     const k = parseInt(parts[2], 10)
-    const r = parseInt(parts[3], 10)
+    const n = parseInt(parts[3], 10)
     const seq = parseInt(parts[4], 10)
-    const seed = parseInt(parts[5], 10)
-    const data = b64ToBytes(parts.slice(6).join("|"))
-    return ingestFountainSymbol(fileId, k, r, seq, seed, data)
+    const data = b64ToBytes(parts.slice(5).join("|"))
+    return ingestMdsSymbol(fileId, k, n, seq, data)
   }
   return false
 }
 
-function countUniqueSources(){
-  if(rxK == null) return 0
-  let n = 0
-  for(let i = 0; i < rxK; i++) if(rxSymbols.has(i)) n++
-  return n
-}
-
-/** Try LT peel whenever we have enough distinct packets — do not wait for every TX frame. */
-function tryPeelSources(){
-  if(!rxFountain || rxK == null) return null
-  const k = rxK
-  // Direct: collected every source symbol
-  let haveAllDirect = true
-  const direct = new Array(k)
-  for(let i = 0; i < k; i++){
-    const s = rxSymbols.get(i)
-    if(s) direct[i] = s.data
-    else haveAllDirect = false
-  }
-  if(haveAllDirect) return direct
-  // Need about k independent equations; try from ~0.9k unique packets upward
-  if(rxSymbols.size < Math.ceil(k * 0.9)) return null
-  return ltDecodePeel(k, rxSymbols)
+function tryRecoverSources(){
+  if(!rxFountain || rxK == null || rxN == null || rxSymLen == null) return null
+  if(rxSymbols.size < rxK) return null
+  return decodeRsPackets(rxSymbols, rxK, rxN, rxSymLen)
 }
 
 function tryFinishFountain(){
-  const sources = tryPeelSources()
+  const sources = tryRecoverSources()
   if(!sources) return false
   if(!rxMeta) rxMeta = { name: "recovered_file", type: "application/octet-stream", size: null }
-  const merged = new Uint8Array(rxK * SYMBOL_SIZE)
-  for(let i = 0; i < rxK; i++) merged.set(sources[i], i * SYMBOL_SIZE)
+  const merged = new Uint8Array(rxK * rxSymLen)
+  for(let i = 0; i < rxK; i++) merged.set(sources[i], i * rxSymLen)
   const finalBytes = rxMeta.size != null ? merged.slice(0, rxMeta.size) : merged
   const blob = new Blob([finalBytes], { type: rxMeta.type || "application/octet-stream" })
   const url = URL.createObjectURL(blob)
@@ -602,12 +617,9 @@ function tryFinishFountain(){
   downloadLink.hidden = false
   progressBar.style.width = "100%"
   progressText.textContent = "Done"
-  const skipped = Math.max(0, (rxK + (rxR || 0)) - rxSymbols.size)
   setStatus(
     `Recovered “${downloadLink.download}” (${finalBytes.length} bytes) · ` +
-    `${rxSymbols.size} unique QRs` +
-    (skipped > 0 ? ` · skipped ~${skipped} frames` : "") +
-    ` · ${rxDecodeCount} scans`
+    `${rxSymbols.size}/${rxN} QRs (need ${rxK})`
   )
   try{ downloadLink.click() }catch(_){}
   rxRecovered = true
@@ -797,7 +809,7 @@ async function decodeLoop(){
   if(video.videoWidth) decodeDbg.video = `${video.videoWidth}x${video.videoHeight}`
 
   const need = rxK != null
-    ? `${rxSymbols.size} unique · need ~${rxK} (sources ${countUniqueSources()}/${rxK})`
+    ? `${rxSymbols.size}/${rxN} unique · need any ${rxK}`
     : "waiting for first QR"
   progressText.textContent = need
   if(rxFountain && rxK){
@@ -815,16 +827,12 @@ async function decodeLoop(){
       lastQrText = text
       if(ingestPayloadText(text)){
         rxPayloadOk = true
-        setStatus(
-          `Fountain ${rxSymbols.size}/~${rxK} unique` +
-          ` · sources ${countUniqueSources()}/${rxK}` +
-          ` · misses OK`
-        )
+        setStatus(`MDS ${rxSymbols.size}/${rxN} · need any ${rxK} · misses OK`)
         if(tryFinish()) return
       }else{
         decodeDbg.last = `ignored: ${text.slice(0, 40)}`
       }
-    }else if(rxFountain && rxSymbols.size >= Math.ceil((rxK || 1) * 0.9)){
+    }else if(rxFountain && rxSymbols.size >= (rxK || 0)){
       if(tryFinish()) return
     }
   }else{

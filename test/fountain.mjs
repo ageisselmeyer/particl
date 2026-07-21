@@ -1,165 +1,116 @@
 #!/usr/bin/env node
-/** Fountain recovery with intentional drops. Run: node test/fountain.mjs */
+/** MDS packet RS: any k of n recover. Run: node test/fountain.mjs */
+import { rsEncode, rsDecodeErasures } from "../rs.js"
 
-function fountainRng(seed){
-  let s = seed >>> 0
+const TARGET_K = 10
+const TARGET_N = 20
+
+function planCoding(fileLen){
+  let k = TARGET_K
+  let n = TARGET_N
+  let sym = Math.max(1, Math.ceil(fileLen / k))
+  while(sym > 220){
+    k++
+    n = k * 2
+    sym = Math.max(1, Math.ceil(fileLen / k))
+  }
+  return { k, n, sym }
+}
+
+function encodeRsPackets(sources, n){
+  const k = sources.length
+  const nsym = n - k
+  const symLen = sources[0].length
+  const packets = Array.from({ length: n }, () => new Uint8Array(symLen))
+  for(let b = 0; b < symLen; b++){
+    const col = new Uint8Array(k)
+    for(let j = 0; j < k; j++) col[j] = sources[j][b]
+    const cw = rsEncode(col, nsym)
+    for(let i = 0; i < n; i++) packets[i][b] = cw[i]
+  }
+  return packets
+}
+
+function decodeRsPackets(symbolMap, k, n, symLen){
+  if(symbolMap.size < k) return null
+  const nsym = n - k
+  const erase = []
+  for(let i = 0; i < n; i++) if(!symbolMap.has(i)) erase.push(i)
+  if(erase.length > nsym) return null
+  const sources = Array.from({ length: k }, () => new Uint8Array(symLen))
+  for(let b = 0; b < symLen; b++){
+    const cw = new Uint8Array(n)
+    for(let i = 0; i < n; i++){
+      const s = symbolMap.get(i)
+      cw[i] = s ? s[b] : 0
+    }
+    const col = rsDecodeErasures(cw, nsym, erase)
+    if(!col) return null
+    for(let j = 0; j < k; j++) sources[j][b] = col[j]
+  }
+  return sources
+}
+
+function mulberry(seed){
+  let a = seed >>> 0
   return () => {
-    s = (Math.imul(s, 1664525) + 1013904223) >>> 0
-    return s / 4294967296
+    a |= 0
+    a = (a + 0x6d2b79f5) | 0
+    let t = Math.imul(a ^ (a >>> 15), 1 | a)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
   }
-}
-function pickLtDegree(k, rnd){
-  if(k <= 1) return 1
-  const u = rnd()
-  if(u < 0.4) return 1
-  if(u < 0.7) return 2
-  if(u < 0.9) return Math.min(k, 3)
-  return Math.min(k, 2 + ((rnd() * Math.min(k - 1, 6)) | 0))
-}
-function ltIndices(k, seed){
-  const rnd = fountainRng(seed)
-  const d = Math.min(k, Math.max(1, pickLtDegree(k, rnd)))
-  const set = new Set()
-  let guard = 0
-  while(set.size < d && guard++ < k * 8) set.add((rnd() * k) | 0)
-  if(!set.size) set.add(0)
-  return [...set]
-}
-function xorBytes(into, from){
-  const n = Math.min(into.length, from.length)
-  for(let i = 0; i < n; i++) into[i] ^= from[i]
-}
-function ltDecodeGE(k, symbolMap){
-  const rows = []
-  for(const sym of symbolMap.values()){
-    const coef = new Uint8Array(k)
-    for(const i of sym.indices) if(i >= 0 && i < k) coef[i] = 1
-    let any = false
-    for(let i = 0; i < k; i++) if(coef[i]){ any = true; break }
-    if(!any) continue
-    rows.push({ coef, data: sym.data.slice() })
-  }
-  if(rows.length < k) return null
-  const pivotForCol = new Int32Array(k).fill(-1)
-  let row = 0
-  for(let col = 0; col < k; col++){
-    let piv = -1
-    for(let i = row; i < rows.length; i++){
-      if(rows[i].coef[col]){ piv = i; break }
-    }
-    if(piv < 0) continue
-    if(piv !== row){
-      const tmp = rows[row]; rows[row] = rows[piv]; rows[piv] = tmp
-    }
-    for(let i = 0; i < rows.length; i++){
-      if(i === row || !rows[i].coef[col]) continue
-      for(let c = 0; c < k; c++) rows[i].coef[c] ^= rows[row].coef[c]
-      xorBytes(rows[i].data, rows[row].data)
-    }
-    pivotForCol[col] = row
-    row++
-    if(row >= rows.length) break
-  }
-  const known = new Array(k).fill(null)
-  for(let col = 0; col < k; col++){
-    const pr = pivotForCol[col]
-    if(pr < 0) return null
-    const data = rows[pr].data.slice()
-    for(let c = 0; c < k; c++){
-      if(c === col) continue
-      if(rows[pr].coef[c]){
-        if(!known[c]) return null
-        xorBytes(data, known[c])
-      }
-    }
-    known[col] = data
-  }
-  return known
-}
-function fileIdSeed(fileId, j){
-  let h = 2166136261 >>> 0
-  for(let i = 0; i < fileId.length; i++){
-    h ^= fileId.charCodeAt(i)
-    h = Math.imul(h, 16777619) >>> 0
-  }
-  return (h ^ Math.imul(j + 1, 0x9e3779b1)) >>> 0
-}
-function hash01(i, salt){
-  let x = Math.imul(i ^ (salt * 0x9e3779b9), 0x85ebca6b) >>> 0
-  x ^= x >>> 16
-  x = Math.imul(x, 0xc2b2ae35) >>> 0
-  x ^= x >>> 13
-  return (x >>> 0) / 4294967296
 }
 
-const SYMBOL_SIZE = 96
-const FOUNTAIN_SOURCE_COPIES = 1
-const FOUNTAIN_REPAIR_BASE = 1.0
-
-function buildPackets(fileBytes){
-  const fileId = "testdev"
-  const k = Math.max(1, Math.ceil(fileBytes.length / SYMBOL_SIZE))
-  const padded = new Uint8Array(k * SYMBOL_SIZE)
-  padded.set(fileBytes)
-  const sources = []
-  for(let i = 0; i < k; i++) sources.push(padded.subarray(i * SYMBOL_SIZE, (i + 1) * SYMBOL_SIZE))
-  const r = Math.max(3, Math.ceil(k * FOUNTAIN_REPAIR_BASE))
-  const packets = []
-  for(let copy = 0; copy < FOUNTAIN_SOURCE_COPIES; copy++){
-    for(let i = 0; i < k; i++) packets.push({ seq: i, seed: 0, data: sources[i].slice(), indices: [i] })
-  }
-  for(let j = 0; j < r; j++){
-    const seed = fileIdSeed(fileId, j)
-    const indices = ltIndices(k, seed)
-    const data = new Uint8Array(SYMBOL_SIZE)
-    for(const idx of indices) xorBytes(data, sources[idx])
-    packets.push({ seq: k + j, seed, data, indices })
-  }
-  for(let i = packets.length - 1; i > 0; i--){
-    const j = Math.floor(hash01(i, 91) * (i + 1))
-    const t = packets[i]; packets[i] = packets[j]; packets[j] = t
-  }
-  return { k, r, packets }
-}
-
-function recover(packets, k, dropRatio, seed){
-  const rnd = fountainRng(seed)
-  const map = new Map()
-  for(const p of packets){
-    if(rnd() < dropRatio) continue
-    if(map.has(p.seq)) continue
-    map.set(p.seq, { data: p.data.slice(), indices: p.indices })
-  }
-  const ge = ltDecodeGE(k, map)
-  return { ok: !!ge, kept: map.size, data: ge }
-}
-
-const fileBytes = new Uint8Array(96 * 8 + 40)
+const fileBytes = new Uint8Array(2048)
 for(let i = 0; i < fileBytes.length; i++) fileBytes[i] = (i * 17 + 3) & 255
-const { k, r, packets } = buildPackets(fileBytes)
-console.log(`Fountain test: k=${k} r=${r} total=${packets.length} file=${fileBytes.length}B`)
+const { k, n, sym } = planCoding(fileBytes.length)
+const padded = new Uint8Array(k * sym)
+padded.set(fileBytes)
+const sources = []
+for(let i = 0; i < k; i++) sources.push(padded.subarray(i * sym, (i + 1) * sym))
+const packets = encodeRsPackets(sources, n)
+
+console.log(`2KB plan: k=${k} n=${n} sym=${sym} frames=${n} need=${k}`)
 
 let fails = 0
-for(const [label, drop, seed, required] of [
-  ["0% drop", 0, 1, true],
-  ["20% drop", 0.2, 2, true],
-  ["35% drop", 0.35, 3, true],
-  ["35% drop b", 0.35, 7, true]
+for(const [label, keepCount, seed] of [
+  ["exactly k", k, 1],
+  ["exactly k (b)", k, 7],
+  ["k+2", k + 2, 3],
+  ["all n", n, 1]
 ]){
-  const res = recover(packets, k, drop, seed)
-  let bytesOk = false
-  if(res.ok && res.data){
-    const merged = new Uint8Array(k * SYMBOL_SIZE)
-    for(let i = 0; i < k; i++) merged.set(res.data[i], i * SYMBOL_SIZE)
-    bytesOk = [...fileBytes].every((b, i) => merged[i] === b)
+  const rnd = mulberry(seed)
+  const idx = Array.from({ length: n }, (_, i) => i)
+  for(let i = idx.length - 1; i > 0; i--){
+    const j = (rnd() * (i + 1)) | 0
+    const t = idx[i]; idx[i] = idx[j]; idx[j] = t
   }
-  const ok = res.ok && bytesOk
-  console.log(`  ${ok ? "✓" : "✗"} ${label}: kept ${res.kept}/${packets.length}`)
-  if(required && !ok) fails++
+  const map = new Map()
+  for(let i = 0; i < keepCount; i++) map.set(idx[i], packets[idx[i]])
+  const recovered = decodeRsPackets(map, k, n, sym)
+  let ok = false
+  if(recovered){
+    const merged = new Uint8Array(k * sym)
+    for(let i = 0; i < k; i++) merged.set(recovered[i], i * sym)
+    ok = [...fileBytes].every((b, i) => merged[i] === b)
+  }
+  console.log(`  ${ok ? "✓" : "✗"} ${label}: kept ${map.size}/${n}`)
+  if(!ok) fails++
+}
+
+// k-1 must fail
+{
+  const map = new Map()
+  for(let i = 0; i < k - 1; i++) map.set(i, packets[i])
+  const recovered = decodeRsPackets(map, k, n, sym)
+  const ok = recovered == null
+  console.log(`  ${ok ? "✓" : "✗"} k-1 must fail`)
+  if(!ok) fails++
 }
 
 if(fails){
-  console.error(`FAILED: ${fails} cases`)
+  console.error("FAILED", fails)
   process.exit(1)
 }
-console.log("All fountain recovery cases OK (misses tolerated).")
+console.log("All MDS any-k-of-n cases OK.")
