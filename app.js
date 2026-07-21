@@ -2,6 +2,7 @@ import * as THREE from "three"
 import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js"
 import { RenderPass } from "three/addons/postprocessing/RenderPass.js"
 import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js"
+import { rsEncode, rsDecode, RS_NSYM } from "./rs.js"
 
 // --- DOM ---
 const canvas = document.getElementById("cloud")
@@ -252,20 +253,13 @@ function bitsToBytes(bits){
   return out
 }
 
-// Fill the full square: block-repeat payload bits across all DATA_COUNT cells.
-// Front-loaded extras (matched collapse) — this is what reached SYNC 32/32 on device.
+// Even stretch so SYNC, CRC, payload, and RS parity share equal redundancy.
 function expandBits(payload, n){
   const L = payload.length
   if(L <= 0) return "0".repeat(n)
   if(L >= n) return payload.slice(0, n)
-  const rep = (n / L) | 0
-  const extra = n - rep * L
   let out = ""
-  for(let i = 0; i < L; i++){
-    const copies = rep + (i < extra ? 1 : 0)
-    const bit = payload[i]
-    for(let c = 0; c < copies; c++) out += bit
-  }
+  for(let i = 0; i < n; i++) out += payload[((i * L) / n) | 0]
   return out
 }
 
@@ -277,16 +271,38 @@ function collapseVals(vals, targetLen){
     out.set(vals.length >= L ? vals.subarray(0, L) : vals)
     return out
   }
-  const rep = (n / L) | 0
-  const extra = n - rep * L
   const out = new Float32Array(L)
-  let idx = 0
-  for(let i = 0; i < L; i++){
-    const copies = rep + (i < extra ? 1 : 0)
-    let s = 0
-    for(let c = 0; c < copies; c++) s += vals[idx++]
-    out[i] = s / copies
+  const cnt = new Uint16Array(L)
+  for(let i = 0; i < n; i++){
+    const j = ((i * L) / n) | 0
+    out[j] += vals[i]
+    cnt[j]++
   }
+  for(let j = 0; j < L; j++) out[j] /= Math.max(1, cnt[j])
+  return out
+}
+
+/** Subtract local mean on the 32×32 grid — QR-style adaptive contrast. */
+function localNormalize(vals, winHalf = 2){
+  if(vals.length !== DATA_COUNT) return vals
+  const out = new Float32Array(DATA_COUNT)
+  for(let gy = 0; gy < GRID_H; gy++){
+    for(let gx = 0; gx < GRID_W; gx++){
+      let sum = 0, n = 0
+      for(let dy = -winHalf; dy <= winHalf; dy++){
+        for(let dx = -winHalf; dx <= winHalf; dx++){
+          const x = gx + dx, y = gy + dy
+          if(x < 0 || y < 0 || x >= GRID_W || y >= GRID_H) continue
+          sum += vals[y * GRID_W + x]
+          n++
+        }
+      }
+      out[gy * GRID_W + gx] = vals[gy * GRID_W + gx] - sum / n
+    }
+  }
+  let min = Infinity
+  for(let i = 0; i < DATA_COUNT; i++) if(out[i] < min) min = out[i]
+  for(let i = 0; i < DATA_COUNT; i++) out[i] -= min
   return out
 }
 
@@ -707,15 +723,16 @@ function buildFrames(fileBytes, fileMeta){
     }
     const raw = new TextEncoder().encode(payload)
     const crc = crc32(raw)
-    // CRC first (top of grid, next to SYNC) — suffix CRC sat in the glare zone and always failed.
+    // CRC first, then Reed-Solomon parity (QR-style) — corrects ~12 wrong bytes.
     const body = new Uint8Array(4 + raw.length)
     body[0] = (crc >>> 24) & 255
     body[1] = (crc >>> 16) & 255
     body[2] = (crc >>> 8) & 255
     body[3] = crc & 255
     body.set(raw, 4)
+    const cw = rsEncode(body, RS_NSYM)
 
-    const payloadBits = SYNC + bytesToBits(body)
+    const payloadBits = SYNC + bytesToBits(cw)
     if(payloadBits.length > DATA_COUNT){
       console.warn(`Packet ${pi} needs ${payloadBits.length} bits but frame holds ${DATA_COUNT}; truncating`)
       out.push(payloadBits.slice(0, DATA_COUNT))
@@ -1044,16 +1061,16 @@ function bitsFromAccum(accum, frames){
   return bitsFromVals(vals)
 }
 
-// Frames are stretch-filled across the grid — collapse to each candidate packet length.
+// Frames are stretch-filled across the grid — collapse to each candidate RS codeword length.
 function valsToPayload(vals){
   if(!vals || vals.length < SYNC.length + 40) return null
-  const maxBody = Math.min(520, ((vals.length - SYNC.length) / 8) | 0)
-  const minBody = 5
-  const bodies = []
-  for(let bb = minBody; bb <= maxBody; bb++) bodies.push(bb)
-  bodies.sort((a, b) => {
-    const da = Math.min(Math.abs(a - 47), Math.abs(a - 82))
-    const db = Math.min(Math.abs(b - 47), Math.abs(b - 82))
+  const normalized = localNormalize(vals)
+  const maxCw = Math.min(160, ((normalized.length - SYNC.length) / 8) | 0)
+  const cws = []
+  for(let cw = RS_NSYM + 5; cw <= maxCw; cw++) cws.push(cw)
+  cws.sort((a, b) => {
+    const da = Math.min(Math.abs(a - 75), Math.abs(a - 110))
+    const db = Math.min(Math.abs(b - 75), Math.abs(b - 110))
     return da - db || a - b
   })
 
@@ -1062,10 +1079,9 @@ function valsToPayload(vals){
   let bestBits = null
   let bestConf = null
 
-  // Try raw samples only (multi-unsharp chased false lengths on device).
-  for(const bb of bodies){
-    const L = SYNC.length + bb * 8
-    const cvals = collapseVals(vals, L)
+  for(const cwLen of cws){
+    const L = SYNC.length + cwLen * 8
+    const cvals = collapseVals(normalized, L)
     const r = thresholdVals(cvals)
     if(r.sync > bestOk){
       bestOk = r.sync
@@ -1076,7 +1092,7 @@ function valsToPayload(vals){
     }
     if(r.sync < 26) continue
     triedLens++
-    const hit = decodeBodyText(r.bits.slice(SYNC.length), `fill@${L}(${r.sync}/32)`)
+    const hit = decodeBodyText(r.bits.slice(SYNC.length), `rs@${L}(${r.sync}/32)`)
     if(hit.text){
       decodeDbg.sync = r.sync
       decodeDbg.crc = "ok"
@@ -1098,7 +1114,7 @@ function valsToPayload(vals){
     const amb = []
     for(let i = SYNC.length; i < bestBits.length; i++) amb.push({ i, c: bestConf[i] ?? 1e9 })
     amb.sort((a, b) => a.c - b.c)
-    const top = amb.slice(0, 12).map(x => x.i)
+    const top = amb.slice(0, 16).map(x => x.i)
     const flipAt = (src, idx) => {
       const arr = src.split("")
       arr[idx] = arr[idx] === "1" ? "0" : "1"
@@ -1113,8 +1129,8 @@ function valsToPayload(vals){
         return hit.text
       }
     }
-    for(let a = 0; a < Math.min(6, top.length); a++){
-      for(let b = a + 1; b < Math.min(6, top.length); b++){
+    for(let a = 0; a < Math.min(8, top.length); a++){
+      for(let b = a + 1; b < Math.min(8, top.length); b++){
         let s = flipAt(bestBits, top[a])
         s = flipAt(s, top[b])
         const hit = decodeBodyText(s.slice(SYNC.length), `flip2`)
@@ -1367,8 +1383,9 @@ function updateDecodeMeters(){
     crcScore = Math.min(95, Math.round((rxSymbols.size / need) * 95))
     crcLabel = `${rxSymbols.size}/${need} symbols`
   }else if(decodeDbg.align === "locked" && syncNow >= 28 && contrast >= 18){
-    crcScore = Math.min(40, Math.round(((syncNow - 28) / 4) * 40))
-    crcLabel = `close · SYNC ${syncNow}/32`
+    // High SYNC alone is not CRC progress — the old "40%" meter was misleading.
+    crcScore = 8
+    crcLabel = `SYNC ${syncNow}/32 · need CRC`
   }else{
     crcScore = 0
     crcLabel = "no lock"
@@ -1574,18 +1591,32 @@ function decodeBodyText(bodyBits, startLabel){
     return null
   }
 
-  // CRC-prefixed body (current): [crc32:4][raw…] — sits next to SYNC at top of grid.
-  for(let rawLen = 4; rawLen <= maxBytes - 4; rawLen++){
-    const body = bitsToBytes(bodyBits.slice(0, (rawLen + 4) * 8))
+  const tryCrcPrefixed = (data, label) => {
+    if(!data || data.length < 5) return null
     tried++
     const crc =
-      ((body[0] << 24) |
-        (body[1] << 16) |
-        (body[2] << 8) |
-        body[3]) >>> 0
-    const raw = body.subarray(4, 4 + rawLen)
-    if(crc32(raw) !== crc) continue
-    const hit = tryText(raw, startLabel)
+      ((data[0] << 24) |
+        (data[1] << 16) |
+        (data[2] << 8) |
+        data[3]) >>> 0
+    const raw = data.subarray(4)
+    if(crc32(raw) !== crc) return null
+    return tryText(raw, label)
+  }
+
+  // RS codeword: [crc|raw] + RS_NSYM parity — corrects up to 12 bad bytes.
+  for(let cwLen = RS_NSYM + 5; cwLen <= maxBytes; cwLen++){
+    const cw = bitsToBytes(bodyBits.slice(0, cwLen * 8))
+    if(cw.length !== cwLen) continue
+    const data = rsDecode(cw, RS_NSYM)
+    const hit = tryCrcPrefixed(data, startLabel + "/rs")
+    if(hit) return hit
+  }
+
+  // Legacy CRC-prefixed body (no RS): [crc32:4][raw…]
+  for(let rawLen = 4; rawLen <= maxBytes - 4; rawLen++){
+    const body = bitsToBytes(bodyBits.slice(0, (rawLen + 4) * 8))
+    const hit = tryCrcPrefixed(body, startLabel)
     if(hit) return hit
   }
 

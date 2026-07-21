@@ -1,5 +1,8 @@
 /** Pure encode/decode protocol — shared by the app and automated roundtrip tests. */
 
+import { rsEncode, rsDecode, RS_NSYM } from "./rs.js"
+
+export { RS_NSYM }
 export const SYNC = "11001100111100001010101011001100"
 export const GRID_W = 32
 export const GRID_H = 32
@@ -28,18 +31,16 @@ export function crc32(bytes){
   return (c ^ 0xffffffff) >>> 0
 }
 
-/** Front-loaded block-repeat (matched expand/collapse) — best SYNC lock on device. */
+/**
+ * Even stretch across the frame so SYNC, CRC, payload, and RS parity share
+ * equal redundancy (front-loaded stretch starved parity at the end).
+ */
 export function expandBits(payload, n){
   const L = payload.length
   if(L <= 0) return "0".repeat(n)
   if(L >= n) return payload.slice(0, n)
-  const rep = (n / L) | 0
-  const extra = n - rep * L
   let out = ""
-  for(let i = 0; i < L; i++){
-    const copies = rep + (i < extra ? 1 : 0)
-    out += payload[i].repeat(copies)
-  }
+  for(let i = 0; i < n; i++) out += payload[((i * L) / n) | 0]
   return out
 }
 
@@ -51,16 +52,14 @@ export function collapseVals(vals, targetLen){
     out.set(vals.length >= L ? vals.subarray(0, L) : vals)
     return out
   }
-  const rep = (n / L) | 0
-  const extra = n - rep * L
   const out = new Float32Array(L)
-  let idx = 0
-  for(let i = 0; i < L; i++){
-    const copies = rep + (i < extra ? 1 : 0)
-    let s = 0
-    for(let c = 0; c < copies; c++) s += vals[idx++]
-    out[i] = s / copies
+  const cnt = new Uint16Array(L)
+  for(let i = 0; i < n; i++){
+    const j = ((i * L) / n) | 0
+    out[j] += vals[i]
+    cnt[j]++
   }
+  for(let j = 0; j < L; j++) out[j] /= Math.max(1, cnt[j])
   return out
 }
 
@@ -69,6 +68,31 @@ export function syncScoreAt(bits, start = 0){
   let ok = 0
   for(let j = 0; j < SYNC.length; j++) if(bits[start + j] === SYNC[j]) ok++
   return ok
+}
+
+/** Subtract local mean on the 32×32 grid — QR-style adaptive contrast. */
+export function localNormalize(vals, winHalf = 2){
+  if(vals.length !== DATA_COUNT) return vals
+  const out = new Float32Array(DATA_COUNT)
+  for(let gy = 0; gy < GRID_H; gy++){
+    for(let gx = 0; gx < GRID_W; gx++){
+      let sum = 0, n = 0
+      for(let dy = -winHalf; dy <= winHalf; dy++){
+        for(let dx = -winHalf; dx <= winHalf; dx++){
+          const x = gx + dx, y = gy + dy
+          if(x < 0 || y < 0 || x >= GRID_W || y >= GRID_H) continue
+          sum += vals[y * GRID_W + x]
+          n++
+        }
+      }
+      out[gy * GRID_W + gx] = vals[gy * GRID_W + gx] - sum / n
+    }
+  }
+  // Shift to positive ink-like range for Otsu
+  let min = Infinity
+  for(let i = 0; i < DATA_COUNT; i++) if(out[i] < min) min = out[i]
+  for(let i = 0; i < DATA_COUNT; i++) out[i] -= min
+  return out
 }
 
 export function thresholdVals(vals){
@@ -104,8 +128,26 @@ export function thresholdVals(vals){
   }
   const thr = vmin + ((bestT + 0.5) / 31) * span
   let bits = ""
-  for(let i = 0; i < n; i++) bits += vals[i] > thr ? "1" : "0"
-  return { bits, thr, mean, std, sync: syncScoreAt(bits, 0) }
+  const conf = new Float32Array(n)
+  for(let i = 0; i < n; i++){
+    bits += vals[i] > thr ? "1" : "0"
+    conf[i] = Math.abs(vals[i] - thr)
+  }
+  return { bits, thr, mean, std, sync: syncScoreAt(bits, 0), conf }
+}
+
+function tryDecodeCrcBody(data){
+  if(!data || data.length < 5) return null
+  const crc =
+    ((data[0] << 24) | (data[1] << 16) | (data[2] << 8) | data[3]) >>> 0
+  const raw = data.subarray(4)
+  if(crc32(raw) !== crc) return null
+  try{
+    const text = new TextDecoder().decode(raw)
+    if(text.startsWith("PC6M|") || text.startsWith("PC6|") ||
+       text.startsWith("PC5M|") || text.startsWith("PC5D|")) return text
+  }catch(_){}
+  return null
 }
 
 export function wrapPayload(text){
@@ -117,23 +159,29 @@ export function wrapPayload(text){
   body[2] = (crc >>> 8) & 255
   body[3] = crc & 255
   body.set(raw, 4)
-  return SYNC + bytesToBits(body)
+  const cw = rsEncode(body, RS_NSYM)
+  return SYNC + bytesToBits(cw)
 }
 
+/** Decode body bits: RS codeword first, then legacy plain CRC body. */
 export function decodeBodyText(bodyBits){
   const maxBytes = Math.min(520, (bodyBits.length / 8) | 0)
   if(maxBytes < 5) return null
+
+  // RS path: codeword = [crc|raw] + RS_NSYM parity
+  for(let cwLen = RS_NSYM + 5; cwLen <= maxBytes; cwLen++){
+    const cw = bitsToBytes(bodyBits.slice(0, cwLen * 8))
+    if(cw.length !== cwLen) continue
+    const data = rsDecode(cw, RS_NSYM)
+    const text = tryDecodeCrcBody(data)
+    if(text) return text
+  }
+
+  // Legacy (no RS): [crc32:4][raw…]
   for(let rawLen = 4; rawLen <= maxBytes - 4; rawLen++){
     const body = bitsToBytes(bodyBits.slice(0, (rawLen + 4) * 8))
-    const crc =
-      ((body[0] << 24) | (body[1] << 16) | (body[2] << 8) | body[3]) >>> 0
-    const raw = body.subarray(4, 4 + rawLen)
-    if(crc32(raw) !== crc) continue
-    try{
-      const text = new TextDecoder().decode(raw)
-      if(text.startsWith("PC6M|") || text.startsWith("PC6|") ||
-         text.startsWith("PC5M|") || text.startsWith("PC5D|")) return text
-    }catch(_){}
+    const text = tryDecodeCrcBody(body)
+    if(text) return text
   }
   return null
 }
@@ -175,45 +223,41 @@ export function deblurBitGrid(vals, k = 0.22){
 
 /** Recover payload from full-grid ink samples (higher = darker = bit 1). */
 export function valsToPayload(vals){
-  const maxBody = Math.min(520, ((vals.length - SYNC.length) / 8) | 0)
-  const bodies = []
-  for(let bb = 5; bb <= maxBody; bb++) bodies.push(bb)
-  bodies.sort((a, b) => {
-    const da = Math.min(Math.abs(a - 47), Math.abs(a - 82))
-    const db = Math.min(Math.abs(b - 47), Math.abs(b - 82))
+  const normalized = localNormalize(vals)
+  const maxCw = Math.min(160, ((normalized.length - SYNC.length) / 8) | 0)
+  const cws = []
+  for(let cw = RS_NSYM + 5; cw <= maxCw; cw++) cws.push(cw)
+  // Prefer typical PC6 (~75) and PC6M (~110) codeword sizes
+  cws.sort((a, b) => {
+    const da = Math.min(Math.abs(a - 75), Math.abs(a - 110))
+    const db = Math.min(Math.abs(b - 75), Math.abs(b - 110))
     return da - db || a - b
   })
-
-  const confOf = (cvals, thr) => {
-    const conf = new Float32Array(cvals.length)
-    for(let i = 0; i < cvals.length; i++) conf[i] = Math.abs(cvals[i] - thr)
-    return conf
-  }
 
   let bestSync = 0
   let bestBits = null
   let bestConf = null
 
-  for(const bb of bodies){
-    const L = SYNC.length + bb * 8
-    const cvals = collapseVals(vals, L)
+  for(const cwLen of cws){
+    const L = SYNC.length + cwLen * 8
+    const cvals = collapseVals(normalized, L)
     const r = thresholdVals(cvals)
     if(r.sync > bestSync){
       bestSync = r.sync
       bestBits = r.bits
-      bestConf = confOf(cvals, r.thr)
+      bestConf = r.conf
     }
     if(r.sync < 26) continue
     const text = decodeBodyText(r.bits.slice(SYNC.length))
     if(text) return { text, sync: r.sync, length: L }
   }
 
-  // Soft chase: flip ambiguous body bits near the threshold.
+  // Soft chase: flip ambiguous body bits, then RS+CRC
   if(bestBits && bestConf && bestSync >= 28){
     const amb = []
     for(let i = SYNC.length; i < bestBits.length; i++) amb.push({ i, c: bestConf[i] })
     amb.sort((a, b) => a.c - b.c)
-    const top = amb.slice(0, 12).map(x => x.i)
+    const top = amb.slice(0, 16).map(x => x.i)
     const flipAt = (src, idx) => {
       const arr = src.split("")
       arr[idx] = arr[idx] === "1" ? "0" : "1"
@@ -223,8 +267,8 @@ export function valsToPayload(vals){
       const text = decodeBodyText(flipAt(bestBits, idx).slice(SYNC.length))
       if(text) return { text, sync: bestSync, length: bestBits.length }
     }
-    for(let a = 0; a < Math.min(6, top.length); a++){
-      for(let b = a + 1; b < Math.min(6, top.length); b++){
+    for(let a = 0; a < Math.min(8, top.length); a++){
+      for(let b = a + 1; b < Math.min(8, top.length); b++){
         let s = flipAt(bestBits, top[a])
         s = flipAt(s, top[b])
         const text = decodeBodyText(s.slice(SYNC.length))

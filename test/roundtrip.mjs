@@ -103,6 +103,19 @@ for(const [label, meta, noise, frames, seed] of [
   })
 }
 
+console.log("\n3) RS corrects flipped cells:")
+runCase("PC6 + 8 flipped bits", () => {
+  const text = makePc6(false)
+  const logical = wrapPayload(text)
+  const frame = expandBits(logical, DATA_COUNT)
+  const vals = bitsToInkVals(frame)
+  for(const i of [40, 100, 200, 350, 500, 650, 800, 950]){
+    vals[i] = vals[i] > 100 ? 20 : 200
+  }
+  const recovered = valsToPayload(vals)
+  assert(recovered.text === text, `RS miss sync=${recovered.sync}`)
+})
+
 console.log(`\n${"─".repeat(40)}`)
 console.log(`Result: ${cases.filter(c => c.ok).length}/${cases.length} passed`)
 if(failures.length){
