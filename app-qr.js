@@ -241,25 +241,158 @@ function getJsQR(){
     : null
 }
 
-/** Render QR into the visible <img> via GIF data-URL (no canvas required). */
-function drawQrToCanvas(text){
+const CLOUD_PIXEL = 900
+const PARTICLES_ON = 11
+const PARTICLES_FINDER = 18
+const PARTICLES_OFF = 0.04 // sparse ambient dust in empty modules
+
+let cloudParticles = null
+let cloudMeta = null // { n, margin }
+let cloudAnimT0 = 0
+
+function hash01local(a, b){
+  let x = Math.imul(a ^ (b * 0x9e3779b9), 0x85ebca6b) >>> 0
+  x ^= x >>> 16
+  x = Math.imul(x, 0xc2b2ae35) >>> 0
+  return ((x >>> 0) / 4294967296)
+}
+
+function isFinderCell(r, c, n){
+  const inPat = (rr, cc) => rr >= 0 && rr < 7 && cc >= 0 && cc < 7
+  return inPat(r, c) || inPat(r, c - (n - 7)) || inPat(r - (n - 7), c)
+}
+
+function buildQrMatrix(text){
   const qrcode = getQrCode()
   const qr = qrcode(0, QR_ECC)
   qr.addData(String(text), "Byte")
   qr.make()
-  if(!qrImg) throw new Error("qrImg missing from DOM")
-  qrImg.src = qr.createDataURL(QR_CELL, QR_MARGIN)
-  qrImg.hidden = false
-  qrImg.style.display = "block"
+  return qr
+}
+
+/**
+ * Watch-pairing style: the QR *is* a cloud of blue particles.
+ * Dark modules → dense luminous dots; finders denser; empty cells almost vacant.
+ * Camera still reads it as an inverted/high-contrast QR (jsQR attemptBoth).
+ */
+function spawnCloudFromText(text){
+  const qr = buildQrMatrix(text)
+  const n = qr.getModuleCount()
+  const particles = []
+  for(let r = 0; r < n; r++){
+    for(let c = 0; c < n; c++){
+      const on = qr.isDark(r, c)
+      const finder = on && isFinderCell(r, c, n)
+      const count = on
+        ? (finder ? PARTICLES_FINDER : PARTICLES_ON)
+        : (hash01local(r, c + 17) < PARTICLES_OFF ? 1 : 0)
+      for(let i = 0; i < count; i++){
+        const u = hash01local(r * 131 + c, i * 17 + 3)
+        const v = hash01local(c * 97 + r, i * 29 + 11)
+        // Gaussian-ish jitter inside the module
+        const ox = (u - 0.5) * (on ? 0.62 : 0.9)
+        const oy = (v - 0.5) * (on ? 0.62 : 0.9)
+        particles.push({
+          r, c, on, finder,
+          ox, oy,
+          phase: u * Math.PI * 2,
+          spin: 0.6 + v * 1.4,
+          size: on ? (finder ? 1.15 : 0.85 + u * 0.35) : 0.35,
+          bright: on ? (finder ? 1 : 0.72 + v * 0.25) : 0.06 + u * 0.05
+        })
+      }
+    }
+  }
+  cloudParticles = particles
+  cloudMeta = { n, margin: 0.11 }
+  cloudAnimT0 = performance.now()
+  return { n, particles }
+}
+
+function ensureCloudCanvas(){
+  if(!cloudCanvas) throw new Error("cloud canvas missing")
+  cloudCanvas.hidden = false
+  const dpr = Math.min(2, window.devicePixelRatio || 1)
+  const css = cloudCanvas.clientWidth || CLOUD_PIXEL
+  const px = Math.round(css * dpr)
+  if(cloudCanvas.width !== px || cloudCanvas.height !== px){
+    cloudCanvas.width = px
+    cloudCanvas.height = px
+  }
+  return cloudCanvas.getContext("2d")
+}
+
+function paintParticleCloud(now){
+  if(!cloudParticles || !cloudMeta) return
+  const ctx = ensureCloudCanvas()
+  const W = cloudCanvas.width
+  const { n, margin } = cloudMeta
+  const t = ((now || performance.now()) - cloudAnimT0) * 0.001
+
+  // Deep space background
+  const bg = ctx.createRadialGradient(W * 0.5, W * 0.48, W * 0.05, W * 0.5, W * 0.5, W * 0.72)
+  bg.addColorStop(0, "#0c2238")
+  bg.addColorStop(0.55, "#050b14")
+  bg.addColorStop(1, "#000000")
+  ctx.globalCompositeOperation = "source-over"
+  ctx.fillStyle = bg
+  ctx.fillRect(0, 0, W, W)
+
+  const field = W * (1 - 2 * margin)
+  const cell = field / n
+  const origin = W * margin
+  const quiet = origin * 0.35
+
+  // Soft quiet-zone glow ring (helps cameras find the square without cyan brackets)
+  ctx.beginPath()
+  ctx.arc(W / 2, W / 2, field * 0.5 + quiet * 0.2, 0, Math.PI * 2)
+  ctx.strokeStyle = "rgba(80,170,255,0.08)"
+  ctx.lineWidth = Math.max(2, W * 0.008)
+  ctx.stroke()
+
+  ctx.globalCompositeOperation = "lighter"
+
+  for(const p of cloudParticles){
+    // Local drift only — keep module occupancy so the QR stays decodable
+    const drift = p.on ? 0.1 : 0.2
+    const jx = Math.sin(t * p.spin + p.phase) * drift
+    const jy = Math.cos(t * (p.spin * 0.87) + p.phase * 1.3) * drift
+    const x = origin + (p.c + 0.5 + p.ox + jx) * cell
+    const y = origin + (p.r + 0.5 + p.oy + jy) * cell
+    const rad = Math.max(1.2, cell * 0.28 * p.size)
+
+    // Hot white core (luminance for the camera) + Apple-blue halo (look)
+    const g = ctx.createRadialGradient(x, y, 0, x, y, rad)
+    if(p.on){
+      g.addColorStop(0, `rgba(230,248,255,${0.95 * p.bright})`)
+      g.addColorStop(0.25, `rgba(120,210,255,${0.75 * p.bright})`)
+      g.addColorStop(0.55, `rgba(30,140,255,${0.35 * p.bright})`)
+      g.addColorStop(1, "rgba(0,40,120,0)")
+    }else{
+      g.addColorStop(0, `rgba(100,180,255,${p.bright})`)
+      g.addColorStop(1, "rgba(0,40,100,0)")
+    }
+    ctx.fillStyle = g
+    ctx.beginPath()
+    ctx.arc(x, y, rad, 0, Math.PI * 2)
+    ctx.fill()
+  }
+
+  ctx.globalCompositeOperation = "source-over"
+}
+
+function drawQrToCanvas(text){
+  spawnCloudFromText(text)
+  paintParticleCloud(performance.now())
 }
 
 function showQrUi(){
-  if(cloudCanvas) cloudCanvas.hidden = true
-  if(qrImg) qrImg.hidden = false
-  // Cyan corner marks sit on QR finders and break camera decode — keep them off.
+  if(qrImg) qrImg.hidden = true
+  if(cloudCanvas) cloudCanvas.hidden = false
   const align = document.getElementById("alignFrame")
   if(align) align.hidden = true
-  canvasWrap.classList.add("tx-paper")
+  canvasWrap.classList.remove("tx-paper")
+  canvasWrap.classList.add("tx-cloud")
   canvasWrap.style.display = ""
   videoWrap.hidden = true
 }
@@ -389,12 +522,13 @@ function encodeFile(file){
       const loop = (now) => {
         if(run !== txRun) return
         tickTx(now)
+        paintParticleCloud(now)
         txRaf = requestAnimationFrame(loop)
       }
       txRaf = requestAnimationFrame(loop)
       const ft = frames._fountain || {}
       setStatus(
-        `MDS QR · “${meta.name}” · ${frames.length} frames · ` +
+        `Particle QR · “${meta.name}” · ${frames.length} frames · ` +
         `need any ${ft.need} of ${ft.total} · point camera here`
       )
     }catch(err){
@@ -414,11 +548,11 @@ function tickTx(now){
     elapsed -= FRAME_HOLD_MS
     phaseStartedAt += FRAME_HOLD_MS
     frameIndex = (frameIndex + 1) % frames.length
-    drawQrToCanvas(frames[frameIndex])
+    spawnCloudFromText(frames[frameIndex])
   }
   if((tickTx._lastStatus | 0) !== frameIndex){
     tickTx._lastStatus = frameIndex
-    setStatus(`QR frame ${frameIndex + 1} / ${frames.length} · “${meta?.name || "file"}”`)
+    setStatus(`Cloud frame ${frameIndex + 1} / ${frames.length} · “${meta?.name || "file"}”`)
   }
 }
 
@@ -785,7 +919,7 @@ async function startDecoder(){
   decodeRunning = true
   const showCaptureStatus = () => {
     const capLabel = formatCaptureLabel(captureSettings, video.videoWidth, video.videoHeight)
-    setStatus(`Point at the QR on the Mac · fill the view · ${capLabel}.`)
+    setStatus(`Point at the particle cloud on the Mac · fill the view · ${capLabel}.`)
   }
   showCaptureStatus()
   video.addEventListener("loadedmetadata", () => {
@@ -851,30 +985,24 @@ async function decodeLoop(){
   }
 }
 
-// Boot — wait a tick so classic vendor scripts definitely finished
+// Boot — idle particle QR cloud
 function bootQr(){
-  if(cloudCanvas) cloudCanvas.hidden = true
-  canvasWrap.classList.add("tx-paper")
+  showQrUi()
   try{
     if(typeof (globalThis.qrcode || window.qrcode) !== "function"){
       throw new Error("vendor/qrcode/qrcode.js did not expose window.qrcode")
     }
     drawQrToCanvas("PartiCl QR ready - Encode a file")
-    setStatus("QR mode · Encode a file to stream QR frames — or Decode with the camera.")
+    const idle = (now) => {
+      if(frames.length) return // encode loop takes over
+      paintParticleCloud(now)
+      requestAnimationFrame(idle)
+    }
+    requestAnimationFrame(idle)
+    setStatus("Particle QR · Encode a file — or Decode with the camera.")
   }catch(err){
     console.error(err)
     setStatus(`QR library failed: ${err.message || err}`)
-    if(qrImg){
-      // Visible failure pattern so the box is never blank white
-      qrImg.src = "data:image/svg+xml," + encodeURIComponent(
-        `<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512">
-          <rect width="100%" height="100%" fill="#fff"/>
-          <rect x="32" y="32" width="448" height="448" fill="none" stroke="#000" stroke-width="16"/>
-          <text x="256" y="250" text-anchor="middle" font-size="28" font-family="sans-serif">QR lib failed</text>
-          <text x="256" y="290" text-anchor="middle" font-size="18" font-family="sans-serif">check console</text>
-        </svg>`
-      )
-    }
   }
 }
 if(document.readyState === "loading"){

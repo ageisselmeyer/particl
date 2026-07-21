@@ -13,7 +13,7 @@
 <body>
   <header>
     <h1>PartiCl</h1>
-    <p class="tagline">QR + MDS fountain · <span id="buildId">154500</span></p>
+    <p class="tagline">Particle QR · MDS · <span id="buildId">154600</span></p>
   </header>
 
   <input type="file" id="fileInput" hidden>
@@ -23,9 +23,9 @@
     <button type="button" id="btnDecode">Decode</button>
   </div>
 
-  <div id="canvasWrap" class="tx-paper">
-    <canvas id="cloud" hidden></canvas>
-    <img id="qrImg" alt="QR code" width="1024" height="1024">
+  <div id="canvasWrap" class="tx-cloud">
+    <canvas id="cloud" aria-label="Particle cloud QR"></canvas>
+    <img id="qrImg" hidden alt="" width="1024" height="1024">
     <canvas id="qrCanvas" hidden aria-hidden="true"></canvas>
     <div id="alignFrame" hidden aria-hidden="true">
       <span class="align-mark align-tl"></span>
@@ -93,25 +93,6 @@
 
   <script src="vendor/qrcode/qrcode.js"></script>
   <script src="vendor/jsqr/jsQR.js"></script>
-  <script>
-    // Classic-script smoke test: paint QR even if the ES module fails.
-    (function(){
-      var img = document.getElementById("qrImg");
-      if(!img || typeof qrcode !== "function"){
-        console.error("PartiCl: qrcode not available at classic boot", typeof qrcode);
-        return;
-      }
-      try{
-        var qr = qrcode(0, "Q");
-        qr.addData("PartiCl QR ready - Encode a file", "Byte");
-        qr.make();
-        img.src = qr.createDataURL(10, 8);
-        img.hidden = false;
-      }catch(e){
-        console.error("PartiCl: classic QR draw failed", e);
-      }
-    })();
-  </script>
-  <script type="module" src="app-qr.js?v=154500"></script>
+  <script type="module" src="app-qr.js?v=154600"></script>
 </body>
 </html>
