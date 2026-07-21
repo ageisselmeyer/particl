@@ -97,10 +97,10 @@ button:active{ transform:translateY(0); }
   border:3px solid #5ac8fa;
   box-shadow:0 0 12px rgba(90,200,250,0.55);
 }
-.align-tl{ top:12px; left:12px; border-right:none; border-bottom:none; border-radius:4px 0 0 0; }
-.align-tr{ top:12px; right:12px; border-left:none; border-bottom:none; border-radius:0 4px 0 0; }
-.align-br{ bottom:12px; right:12px; border-left:none; border-top:none; border-radius:0 0 4px 0; }
-.align-bl{ bottom:12px; left:12px; border-right:none; border-top:none; border-radius:0 0 0 4px; }
+.align-tl{ top:4%; left:4%; border-right:none; border-bottom:none; border-radius:4px 0 0 0; }
+.align-tr{ top:4%; right:4%; border-left:none; border-bottom:none; border-radius:0 4px 0 0; }
+.align-br{ bottom:4%; right:4%; border-left:none; border-top:none; border-radius:0 0 4px 0; }
+.align-bl{ bottom:4%; left:4%; border-right:none; border-top:none; border-radius:0 0 0 4px; }
 
 #videoWrap{
   position:relative;

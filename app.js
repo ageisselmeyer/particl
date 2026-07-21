@@ -46,17 +46,17 @@ function setStatus(msg){
 // --- Protocol (simple mode: flat grid, prove CRC, then scale up) ---
 const PARTICLE_COUNT = 8000
 const BIT_REPS = 1
-const GRID_W = 16
-const GRID_H = 16
-const DATA_COUNT = GRID_W * GRID_H // 256 logical bits/frame
+const GRID_W = 32
+const GRID_H = 32
+const DATA_COUNT = GRID_W * GRID_H // 1024 bits/frame — must fit PC6/PC6M (~400–700 bits)
 const PHYS_COUNT = DATA_COUNT * BIT_REPS
 const FRAME_HOLD_MS = 1800
 const FRAME_BLEND_MS = 0
 const SYMBOL_SIZE = 16
 
-// Corner brackets on TX match these normalized positions (center of L-mark).
-const ALIGN_MARKER_UV = 0.075
-const SAMPLE_INSET = 0.08
+// Cyan L-brackets sit at this inset (CSS %). Sample UVs are relative to that frame.
+const ALIGN_MARKER_UV = 0.04
+const SAMPLE_INSET = 0.06
 
 const SYNC = "11001100111100001010101011001100" // 32-bit
 
@@ -189,18 +189,7 @@ let particleDirs = PARTICLE_DIRS
 
 const CAMERA_BASE = { x: 0, y: 0.08, z: 4.15 }
 
-function projectWorldToUV(x, y, z){
-  const fov = 38 * Math.PI / 180
-  const f = 1 / Math.tan(fov * 0.5)
-  const ey = y - CAMERA_BASE.y
-  const ez = z - CAMERA_BASE.z
-  const invZ = 1 / Math.max(0.25, -ez)
-  const ndcX = f * x * invZ
-  const ndcY = f * ey * invZ
-  return [ndcX * 0.5 + 0.5, -ndcY * 0.5 + 0.5]
-}
-
-// Regular grid on a flat plane — decoder UVs come from the same projection as the camera.
+// Regular grid on a flat plane — UVs are align-marker normalized (0–1 between cyan corners).
 const DATA_POS = new Float32Array(PHYS_COUNT * 3)
 const DATA_UV = new Float32Array(PHYS_COUNT * 2)
 const DATA_INDICES = (() => {
@@ -217,18 +206,28 @@ const DATA_INDICES = (() => {
   }
   const idx = Int32Array.from(front.slice(0, PHYS_COUNT))
   const planeZ = 0.55
-  const span = 1.55 // world XY extent of the bit grid
+  const m = ALIGN_MARKER_UV
+  const inset = SAMPLE_INSET
+  const fov = 38 * Math.PI / 180
+  const f = 1 / Math.tan(fov * 0.5)
+  const ez = planeZ - CAMERA_BASE.z
+  const invZ = 1 / Math.max(0.25, -ez)
   for(let b = 0; b < PHYS_COUNT; b++){
     const gx = b % GRID_W
     const gy = (b / GRID_W) | 0
-    const x = ((gx + 0.5) / GRID_W - 0.5) * span
-    const y = (0.5 - (gy + 0.5) / GRID_H) * span
-    DATA_POS[b * 3] = x
-    DATA_POS[b * 3 + 1] = y
+    // Regular grid in align-marker space, with margin so edge bits stay inside the L-frame.
+    const uAlign = inset + ((gx + 0.5) / GRID_W) * (1 - inset * 2)
+    const vAlign = inset + ((gy + 0.5) / GRID_H) * (1 - inset * 2)
+    const uCanvas = m + uAlign * (1 - 2 * m)
+    const vCanvas = m + vAlign * (1 - 2 * m)
+    // Place on plane so screen UV matches (camera looks down -Z, no pitch).
+    const ndcX = (uCanvas - 0.5) * 2
+    const ndcY = -(vCanvas - 0.5) * 2
+    DATA_POS[b * 3] = ndcX / (f * invZ)
+    DATA_POS[b * 3 + 1] = ndcY / (f * invZ) + CAMERA_BASE.y
     DATA_POS[b * 3 + 2] = planeZ
-    const [u, v] = projectWorldToUV(x, y, planeZ)
-    DATA_UV[b * 2] = u
-    DATA_UV[b * 2 + 1] = v
+    DATA_UV[b * 2] = uAlign
+    DATA_UV[b * 2 + 1] = vAlign
   }
   return idx
 })()
@@ -342,9 +341,9 @@ void main(){
   vec4 mv = modelViewMatrix * vec4(pos, 1.0);
   vDepth = -mv.z;
 
-  float size = mix(2.2, mix(4.8, 18.0, uEncode * aData), aSignal) * mix(0.65, 1.05, aFill);
+  float size = mix(2.2, mix(4.8, 11.0, uEncode * aData), aSignal) * mix(0.65, 1.05, aFill);
   size *= mix(0.75, 1.15, aRadius);
-  float sizeCap = mix(9.0, 30.0, uEncode * aData);
+  float sizeCap = mix(9.0, 16.0, uEncode * aData);
   gl_PointSize = clamp(size * (220.0 / max(50.0, -mv.z)), 1.5, sizeCap);
 
   vBright = mix(0.55, 1.0, aData) + 0.45 * smoothstep(-0.2, 0.85, -normalize((modelViewMatrix * vec4(normalize(position), 0.0)).z));
@@ -433,7 +432,7 @@ function initCloud(){
     signalTarget[i] = signal[i]
     dataFlag[i] = IS_DATA[i] ? 1 : 0
   }
-  // Flat grid in world space — must match projectWorldToUV / DATA_UV.
+  // Flat grid in world space — screen positions match DATA_UV in the align frame.
   for(let b = 0; b < PHYS_COUNT; b++){
     const pi = DATA_INDICES[b]
     positions[pi * 3] = DATA_POS[b * 3]
@@ -550,9 +549,11 @@ function renderLoop(now){
     uniforms.uEncode.value = 1
     points.rotation.set(0, 0, 0)
     camera.position.set(CAMERA_BASE.x, CAMERA_BASE.y, CAMERA_BASE.z)
+    // Look straight down -Z (same height) — matches flat-grid placement (no pitch).
+    camera.lookAt(CAMERA_BASE.x, CAMERA_BASE.y, 0)
     if(bloomPass){
-      bloomPass.strength = 0.35
-      bloomPass.threshold = 0.55
+      bloomPass.strength = 0.22
+      bloomPass.threshold = 0.62
     }
   }else{
     uniforms.uTime.value = t
@@ -563,12 +564,12 @@ function renderLoop(now){
     camera.position.x = CAMERA_BASE.x + Math.sin(t * 0.15) * 0.12
     camera.position.y = CAMERA_BASE.y + Math.cos(t * 0.18) * 0.08
     camera.position.z = CAMERA_BASE.z
+    camera.lookAt(0, 0, 0)
     if(bloomPass){
       bloomPass.strength = 1.12
       bloomPass.threshold = 0.52
     }
   }
-  camera.lookAt(0, 0, 0)
 
   const dt = Math.min(0.05, (renderLoop._last ? (now - renderLoop._last) : 16) / 1000)
   renderLoop._last = now
@@ -651,8 +652,12 @@ function buildFrames(fileBytes, fileMeta){
     body[raw.length + 3] = crc & 255
 
     let bits = SYNC + bytesToBits(body)
-    if(bits.length < DATA_COUNT) bits = bits.padEnd(DATA_COUNT, "0")
-    else bits = bits.slice(0, DATA_COUNT)
+    if(bits.length > DATA_COUNT){
+      console.warn(`Packet ${pi} needs ${bits.length} bits but frame holds ${DATA_COUNT}; truncating`)
+      bits = bits.slice(0, DATA_COUNT)
+    }else{
+      bits = bits.padEnd(DATA_COUNT, "0")
+    }
     out.push(bits)
   }
   out._fountain = { k, r, copies: FOUNTAIN_SOURCE_COPIES, total: packets.length }
@@ -679,7 +684,7 @@ function encodeFile(file){
     canvasWrap.style.display = ""
     setSignalBits(frames[0], true)
     setStatus(
-      `Simple 16×16 grid · ${DATA_COUNT} bits/frame · “${meta.name}” · ${frames.length} frames · point camera here`
+      `Simple ${GRID_W}×${GRID_H} grid · ${DATA_COUNT} bits/frame · “${meta.name}” · ${frames.length} frames · point camera here`
     )
   }
   reader.readAsArrayBuffer(file)
@@ -890,6 +895,19 @@ function sampleLumaAt(data, W, H, x, y){
   return n ? acc / n : 0
 }
 
+// Search a small window for the brightest patch — tolerates a few px of UV error.
+function samplePeakAt(data, W, H, x, y, radius){
+  const r = Math.max(1, radius | 0)
+  let best = 0
+  for(let dy = -r; dy <= r; dy++){
+    for(let dx = -r; dx <= r; dx++){
+      const v = sampleLumaAt(data, W, H, x + dx, y + dy)
+      if(v > best) best = v
+    }
+  }
+  return best
+}
+
 function syncScoreAt(bits, start){
   if(!bits || start < 0 || start + SYNC.length > bits.length) return 0
   let ok = 0
@@ -1041,13 +1059,15 @@ function sampleCloudBitsFromVideo(){
 
   function sampleVals(){
     const vals = new Float32Array(DATA_COUNT)
+    // ~⅓ of a cell on the 512² scan (grid fills most of the align quad).
+    const peakR = Math.max(2, Math.round(512 / GRID_W * 0.28))
     for(let b = 0; b < DATA_COUNT; b++){
       let acc = 0
       for(let r = 0; r < BIT_REPS; r++){
         const i = b * BIT_REPS + r
-        // DATA_UV already matches frozen camera projection of the flat grid.
+        // DATA_UV is align-quad normalized (0–1 between cyan corners).
         const p = bilinearInQuad(DATA_UV[i * 2], DATA_UV[i * 2 + 1], useQuad.tl, useQuad.tr, useQuad.br, useQuad.bl)
-        acc += sampleLumaAt(data, W, H, p.x, p.y)
+        acc += samplePeakAt(data, W, H, p.x, p.y, peakR)
       }
       vals[b] = acc / BIT_REPS
     }
