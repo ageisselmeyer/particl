@@ -683,7 +683,7 @@ function orderQuadCorners(pts){
 
 function findBrightRegion(data, W, H, ox, oy, dw, dh){
   let minX = W, minY = H, maxX = 0, maxY = 0, n = 0
-  const step = 3
+  const step = 2
   const x1 = (ox + dw) | 0
   const y1 = (oy + dh) | 0
   for(let y = oy | 0; y < y1; y += step){
@@ -694,7 +694,7 @@ function findBrightRegion(data, W, H, ox, oy, dw, dh){
       const peak = Math.max(r8, g, b)
       const luma = r8 * 0.299 + g * 0.587 + b * 0.114
       // Particle cloud / bloom — ignore dark chrome around the Mac window.
-      if(peak < 85 || luma < 55) continue
+      if(peak < 55 || luma < 35) continue
       minX = Math.min(minX, x)
       minY = Math.min(minY, y)
       maxX = Math.max(maxX, x)
@@ -702,11 +702,11 @@ function findBrightRegion(data, W, H, ox, oy, dw, dh){
       n++
     }
   }
-  if(n < 50) return null
+  if(n < 30) return null
   const bw = maxX - minX
   const bh = maxY - minY
-  if(bw < Math.min(dw, dh) * 0.18 || bh < Math.min(dw, dh) * 0.18) return null
-  const pad = Math.round(Math.min(bw, bh) * 0.06)
+  if(bw < Math.min(dw, dh) * 0.12 || bh < Math.min(dw, dh) * 0.12) return null
+  const pad = Math.round(Math.min(bw, bh) * 0.08)
   const x = Math.max(ox, minX - pad)
   const y = Math.max(oy, minY - pad)
   const r = Math.min(ox + dw, maxX + pad)
@@ -724,59 +724,57 @@ function findCornerCentroid(data, W, H, x0, y0, w, h){
       const peak = Math.max(r8, g, b)
       const sat = peak - Math.min(r8, g, b)
       // Glossy screen: skip white specular blobs (they are not cyan brackets).
-      if(peak > 190 && sat < 55 && r8 > peak * 0.85) continue
-      // Prefer cyan/blue brackets over particle cores.
-      if(!(g > r8 * 0.95 && b > r8 * 0.95)) continue
-      const cyan = Math.max(0, (g + b) * 0.5 - r8 * 0.45)
-      if(cyan < 28) continue
-      const weight = cyan * (0.55 + 0.45 * Math.min(1, sat / 90))
-      if(weight < 22) continue
+      if(peak > 210 && sat < 35 && r8 > peak * 0.88) continue
+      const cyan = Math.max(0, (g + b) * 0.5 - r8 * 0.35)
+      if(cyan < 18) continue
+      // Soft cyan bias — phone cameras often wash brackets toward white-blue.
+      const blueBias = (b + g) - r8 * 1.5
+      if(blueBias < 8) continue
+      const weight = cyan * 0.7 + blueBias * 0.3 + sat * 0.15
+      if(weight < 16) continue
       sx += x * weight
       sy += y * weight
       wsum += weight
     }
   }
-  if(wsum < 40) return null
+  if(wsum < 25) return null
   return { x: sx / wsum, y: sy / wsum }
 }
 
 function detectAlignQuad(data, W, H, rect){
   const { ox, oy, dw, dh } = rect
-  // Phone cameras are portrait: the Mac window (and cyan brackets) sit in the
-  // middle of the frame — not at the video edges. Find the bright cloud region first.
+  // Prefer the bright cloud/Mac region (portrait cameras place it mid-frame).
   const region = findBrightRegion(data, W, H, ox, oy, dw, dh)
   const rx = region ? region.x : ox
   const ry = region ? region.y : oy
   const rw = region ? region.w : dw
   const rh = region ? region.h : dh
-  const pad = Math.round(Math.min(rw, rh) * 0.28)
+  const pad = Math.round(Math.min(rw, rh) * 0.3)
   const cTL = findCornerCentroid(data, W, H, rx | 0, ry | 0, pad, pad)
   const cTR = findCornerCentroid(data, W, H, (rx + rw - pad) | 0, ry | 0, pad, pad)
   const cBR = findCornerCentroid(data, W, H, (rx + rw - pad) | 0, (ry + rh - pad) | 0, pad, pad)
   const cBL = findCornerCentroid(data, W, H, rx | 0, (ry + rh - pad) | 0, pad, pad)
-  if(!cTL || !cTR || !cBR || !cBL){
-    // Still usable: sample through the bright Mac-window region even without brackets.
-    if(region && Math.min(rw, rh) > Math.min(dw, dh) * 0.2){
-      return {
-        tl: { x: rx, y: ry },
-        tr: { x: rx + rw, y: ry },
-        br: { x: rx + rw, y: ry + rh },
-        bl: { x: rx, y: ry + rh },
-        _soft: true
-      }
-    }
-    return null
+  if(cTL && cTR && cBR && cBL){
+    const q = orderQuadCorners([cTL, cTR, cBR, cBL])
+    const wTop = Math.hypot(q.tr.x - q.tl.x, q.tr.y - q.tl.y)
+    const wBot = Math.hypot(q.br.x - q.bl.x, q.br.y - q.bl.y)
+    const hL = Math.hypot(q.bl.x - q.tl.x, q.bl.y - q.tl.y)
+    const hR = Math.hypot(q.br.x - q.tr.x, q.br.y - q.tr.y)
+    const minSide = Math.min(wTop, wBot, hL, hR)
+    const maxSide = Math.max(wTop, wBot, hL, hR)
+    if(minSide >= Math.min(rw, rh) * 0.35 && maxSide <= minSide * 1.75) return q
   }
-  const q = orderQuadCorners([cTL, cTR, cBR, cBL])
-  const wTop = Math.hypot(q.tr.x - q.tl.x, q.tr.y - q.tl.y)
-  const wBot = Math.hypot(q.br.x - q.bl.x, q.br.y - q.bl.y)
-  const hL = Math.hypot(q.bl.x - q.tl.x, q.bl.y - q.tl.y)
-  const hR = Math.hypot(q.br.x - q.tr.x, q.br.y - q.tr.y)
-  const minSide = Math.min(wTop, wBot, hL, hR)
-  if(minSide < Math.min(rw, rh) * 0.45) return null
-  const maxSide = Math.max(wTop, wBot, hL, hR)
-  if(maxSide > minSide * 1.65) return null
-  return q
+  // Soft lock: sample through the bright Mac-window region even without brackets.
+  if(region && Math.min(rw, rh) > Math.min(dw, dh) * 0.15){
+    return {
+      tl: { x: rx, y: ry },
+      tr: { x: rx + rw, y: ry },
+      br: { x: rx + rw, y: ry + rh },
+      bl: { x: rx, y: ry + rh },
+      _soft: true
+    }
+  }
+  return null
 }
 
 function sampleLumaAt(data, W, H, x, y){
@@ -826,15 +824,13 @@ function updateLockOverlay(quad, meta){
   if(!lockQuadEl || !videoWrap || !quad || !meta) return
   const wrapW = videoWrap.clientWidth
   const wrapH = videoWrap.clientHeight
-  // Scan canvas coords → video element object-fit:cover mapping.
+  // Preview uses object-fit:cover; map cover-crop scan coords back to the video element.
   const cover = Math.max(wrapW / meta.vw, wrapH / meta.vh)
-  const visW = meta.vw * cover
-  const visH = meta.vh * cover
-  const offX = (wrapW - visW) * 0.5
-  const offY = (wrapH - visH) * 0.5
+  const offX = (wrapW - meta.vw * cover) * 0.5
+  const offY = (wrapH - meta.vh * cover) * 0.5
   const toScreen = (p) => {
-    const vx = ((p.x - meta.ox) / meta.dw) * meta.vw
-    const vy = ((p.y - meta.oy) / meta.dh) * meta.vh
+    const vx = meta.sx + (p.x / meta.W) * meta.side
+    const vy = meta.sy + (p.y / meta.H) * meta.side
     return { x: offX + vx * cover, y: offY + vy * cover }
   }
   const tl = toScreen(quad.tl), tr = toScreen(quad.tr), br = toScreen(quad.br), bl = toScreen(quad.bl)
@@ -853,24 +849,23 @@ function sampleCloudBitsFromVideo(){
   const vw = video.videoWidth, vh = video.videoHeight
   if(!vw || !vh || !particleDirs) return null
   const scan = sampleCloudBitsFromVideo._c || (sampleCloudBitsFromVideo._c = document.createElement("canvas"))
-  const S = 480
+  const S = 512
   scan.width = S
   scan.height = S
   const c = scan.getContext("2d", { willReadFrequently: true })
-  c.fillStyle = "#000"
-  c.fillRect(0, 0, S, S)
-  const scale = S / Math.max(vw, vh)
-  const dw = vw * scale
-  const dh = vh * scale
-  const ox = (S - dw) * 0.5
-  const oy = (S - dh) * 0.5
-  c.drawImage(video, 0, 0, vw, vh, ox, oy, dw, dh)
+  // Match #video { object-fit: cover } so cyan corners land near the scan edges.
+  const side = Math.min(vw, vh)
+  const sx = ((vw - side) / 2) | 0
+  const sy = ((vh - side) / 2) | 0
+  c.drawImage(video, sx, sy, side, side, 0, 0, S, S)
   const img = c.getImageData(0, 0, S, S)
   const data = img.data
   const W = S, H = S
+  const ox = 0, oy = 0, dw = S, dh = S
 
   let quad = detectAlignQuad(data, W, H, { ox, oy, dw, dh })
   let useQuad = quad
+  const overlayMeta = { vw, vh, W, H, dw, dh, ox, oy, sx, sy, side }
   if(quad){
     lastGoodQuad = quad
     lastGoodQuadAge = 0
@@ -878,7 +873,7 @@ function sampleCloudBitsFromVideo(){
     decodeAlignLocked = !quad._soft
     decodeDbg.align = quad._soft ? "region" : "locked"
     decodeDbg.sticky = 0
-    updateLockOverlay(useQuad, { vw, vh, W, H, dw, dh, ox, oy })
+    updateLockOverlay(useQuad, overlayMeta)
   }else if(lastGoodQuad && lastGoodQuadAge < 18){
     // Glare can temporarily hide the corners; re-use the last stable quad.
     useQuad = lastGoodQuad
@@ -887,7 +882,7 @@ function sampleCloudBitsFromVideo(){
     decodeAlignLocked = lastGoodQuadAge <= 3
     decodeDbg.align = "sticky"
     decodeDbg.sticky = lastGoodQuadAge
-    updateLockOverlay(useQuad, { vw, vh, W, H, dw, dh, ox, oy })
+    updateLockOverlay(useQuad, overlayMeta)
   }else{
     decodeAlignMiss++
     decodeAlignLocked = false
@@ -895,15 +890,12 @@ function sampleCloudBitsFromVideo(){
     decodeDbg.align = "fallback-center"
     decodeDbg.sticky = lastGoodQuadAge
     if(lockQuadEl) lockQuadEl.style.display = "none"
-    // Fallback: centered square (legacy path)
-    const side = Math.min(dw, dh)
-    const fx = ox + (dw - side) * 0.5
-    const fy = oy + (dh - side) * 0.5
+    // Cover crop already fills the scan — sample the full square.
     useQuad = {
-      tl: { x: fx, y: fy },
-      tr: { x: fx + side, y: fy },
-      br: { x: fx + side, y: fy + side },
-      bl: { x: fx, y: fy + side }
+      tl: { x: 0, y: 0 },
+      tr: { x: S, y: 0 },
+      br: { x: S, y: S },
+      bl: { x: 0, y: S }
     }
   }
   decodeDbg.miss = decodeAlignMiss
