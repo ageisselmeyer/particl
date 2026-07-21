@@ -43,7 +43,7 @@ function setStatus(msg){
 
 // --- Protocol ---
 const PARTICLE_COUNT = 22000
-const DATA_COUNT = 4096 // bits carried per frame (subset of particles)
+const DATA_COUNT = 4096 // bits per frame — front-hemisphere particles only
 const FRAME_HOLD_MS = 900
 const FRAME_BLEND_MS = 0
 
@@ -178,24 +178,29 @@ function fibonacciSphere(n){
   return pts
 }
 
-// Data carriers: hash-scrambled subset of all particles (no latitude bias)
+const PARTICLE_DIRS = fibonacciSphere(PARTICLE_COUNT)
+let particleDirs = PARTICLE_DIRS
+
+// Data on camera-facing particles only (z toward +Z). Back-hemisphere bits are invisible.
 const DATA_INDICES = (() => {
-  const order = new Int32Array(PARTICLE_COUNT)
-  for(let i = 0; i < PARTICLE_COUNT; i++) order[i] = i
-  // Deterministic Fisher–Yates with hash PRNG
-  for(let i = PARTICLE_COUNT - 1; i > 0; i--){
-    const j = Math.floor(hash01(i, 42) * (i + 1))
-    const t = order[i]; order[i] = order[j]; order[j] = t
+  const front = []
+  for(let i = 0; i < PARTICLE_COUNT; i++){
+    if(PARTICLE_DIRS[i * 3 + 2] > 0.18) front.push(i)
   }
-  return order.subarray(0, DATA_COUNT)
+  for(let i = front.length - 1; i > 0; i--){
+    const j = Math.floor(hash01(i, 42) * (i + 1))
+    const t = front[i]; front[i] = front[j]; front[j] = t
+  }
+  if(front.length < DATA_COUNT){
+    throw new Error(`Need ${DATA_COUNT} front particles, got ${front.length}`)
+  }
+  return Int32Array.from(front.slice(0, DATA_COUNT))
 })()
 const IS_DATA = (() => {
   const m = new Uint8Array(PARTICLE_COUNT)
   for(let i = 0; i < DATA_COUNT; i++) m[DATA_INDICES[i]] = 1
   return m
 })()
-
-let particleDirs = null // set in initCloud; used by decoder sampling
 
 function bytesToBits(bytes){
   let s = ""
@@ -367,7 +372,7 @@ function initCloud(){
   camera = new THREE.PerspectiveCamera(38, w / h, 0.1, 100)
   camera.position.set(CAMERA_BASE.x, CAMERA_BASE.y, CAMERA_BASE.z)
 
-  const dirs = fibonacciSphere(PARTICLE_COUNT)
+  const dirs = PARTICLE_DIRS
   particleDirs = dirs
   const positions = new Float32Array(PARTICLE_COUNT * 3)
   const phase = new Float32Array(PARTICLE_COUNT)
@@ -835,14 +840,16 @@ function sampleLumaAt(data, W, H, x, y){
   return n ? acc / n : 0
 }
 
-function bitsFromAccum(accum, frames){
-  if(!accum || frames < 1) return null
-  const vals = new Float32Array(DATA_COUNT)
+function syncScoreAt(bits, start){
+  if(!bits || start < 0 || start + SYNC.length > bits.length) return 0
+  let ok = 0
+  for(let j = 0; j < SYNC.length; j++) if(bits[start + j] === SYNC[j]) ok++
+  return ok
+}
+
+function bitsFromVals(vals){
   let sum = 0
-  for(let i = 0; i < DATA_COUNT; i++){
-    vals[i] = accum[i] / frames
-    sum += vals[i]
-  }
+  for(let i = 0; i < DATA_COUNT; i++) sum += vals[i]
   const mean = sum / DATA_COUNT
   let varSum = 0
   for(let i = 0; i < DATA_COUNT; i++){
@@ -852,42 +859,46 @@ function bitsFromAccum(accum, frames){
   const std = Math.sqrt(varSum / DATA_COUNT)
   decodeDbg.mean = mean
   decodeDbg.std = std
-  decodeDbg.accum = frames
 
-  // Otsu-ish threshold on a coarse histogram — better than mean+k*std for glossy glare.
-  const bins = new Int32Array(32)
-  let vmin = Infinity, vmax = -Infinity
-  for(let i = 0; i < DATA_COUNT; i++){
-    if(vals[i] < vmin) vmin = vals[i]
-    if(vals[i] > vmax) vmax = vals[i]
+  // Sweep thresholds; pick the one that best matches SYNC at bit 0 (true frame layout).
+  let bestBits = null
+  let bestScore = -1
+  let bestThr = mean
+  const lo = mean - std * 1.2
+  const hi = mean + std * 1.2
+  for(let s = 0; s < 17; s++){
+    const thr = lo + (hi - lo) * (s / 16)
+    let bits = ""
+    for(let i = 0; i < DATA_COUNT; i++) bits += vals[i] > thr ? "1" : "0"
+    const score = syncScoreAt(bits, 0)
+    if(score > bestScore){
+      bestScore = score
+      bestBits = bits
+      bestThr = thr
+    }
   }
-  const span = Math.max(1e-3, vmax - vmin)
-  for(let i = 0; i < DATA_COUNT; i++){
-    const b = Math.min(31, ((vals[i] - vmin) / span * 31) | 0)
-    bins[b]++
+  // Also try a couple of 1-bit slips (sample phase).
+  if(bestScore < 30 && bestBits){
+    for(const slip of [1, 2, 3]){
+      const shifted = "0".repeat(slip) + bestBits.slice(0, DATA_COUNT - slip)
+      const score = syncScoreAt(shifted, 0)
+      if(score > bestScore){
+        bestScore = score
+        bestBits = shifted
+      }
+    }
   }
-  let w0 = 0, sum0 = 0
-  let best = -1, bestVar = -1
-  const total = DATA_COUNT
-  const sumAll = ((mean - vmin) / span) * 31 * total // approx; recompute exactly:
-  let sumBins = 0
-  for(let b = 0; b < 32; b++) sumBins += b * bins[b]
-  for(let t = 0; t < 31; t++){
-    w0 += bins[t]
-    if(!w0) continue
-    sum0 += t * bins[t]
-    const w1 = total - w0
-    if(!w1) break
-    const m0 = sum0 / w0
-    const m1 = (sumBins - sum0) / w1
-    const between = w0 * w1 * (m0 - m1) * (m0 - m1)
-    if(between > bestVar){ bestVar = between; best = t }
-  }
-  const thrBin = best >= 0 ? best + 0.5 : 15.5
-  const thr = vmin + (thrBin / 31) * span
-  let bits = ""
-  for(let i = 0; i < DATA_COUNT; i++) bits += vals[i] > thr ? "1" : "0"
-  return bits
+  decodeDbg.sync = bestScore
+  decodeDbg.last = `thr ${bestThr.toFixed(1)} · SYNC0 ${bestScore}/32`
+  return bestBits
+}
+
+function bitsFromAccum(accum, frames){
+  if(!accum || frames < 1) return null
+  const vals = new Float32Array(DATA_COUNT)
+  for(let i = 0; i < DATA_COUNT; i++) vals[i] = accum[i] / frames
+  decodeDbg.accum = frames
+  return bitsFromVals(vals)
 }
 
 function updateLockOverlay(quad, meta){
@@ -973,34 +984,57 @@ function sampleCloudBitsFromVideo(){
   decodeDbg.accum = decodeBitFrames
 
   const inset = SAMPLE_INSET
-  const vals = new Float32Array(DATA_COUNT)
-  // Match frozen TX camera (FOV 38°, pos CAMERA_BASE) + mean shell radius ~0.90.
-  const fov = 38 * Math.PI / 180
-  const f = 1 / Math.tan(fov * 0.5)
+  const fov0 = 38 * Math.PI / 180
   const camY = CAMERA_BASE.y
   const camZ = CAMERA_BASE.z
-  const shellR = 0.90
-  for(let b = 0; b < DATA_COUNT; b++){
-    const i = DATA_INDICES[b]
-    const x = particleDirs[i * 3] * shellR
-    const y = particleDirs[i * 3 + 1] * shellR
-    const z = particleDirs[i * 3 + 2] * shellR
-    const ex = x
-    const ey = y - camY
-    const ez = z - camZ // ~ -4.15
-    const invZ = 1 / Math.max(0.35, -ez)
-    const ndcX = f * ex * invZ
-    const ndcY = f * ey * invZ
-    let u = ndcX * 0.5 + 0.5
-    let v = -ndcY * 0.5 + 0.5
-    u = inset + u * (1 - inset * 2)
-    v = inset + v * (1 - inset * 2)
-    const p = bilinearInQuad(u, v, useQuad.tl, useQuad.tr, useQuad.br, useQuad.bl)
-    vals[b] = sampleLumaAt(data, W, H, p.x, p.y)
+
+  function sampleVals(shellR, fov){
+    const f = 1 / Math.tan(fov * 0.5)
+    const vals = new Float32Array(DATA_COUNT)
+    for(let b = 0; b < DATA_COUNT; b++){
+      const i = DATA_INDICES[b]
+      const x = particleDirs[i * 3] * shellR
+      const y = particleDirs[i * 3 + 1] * shellR
+      const z = particleDirs[i * 3 + 2] * shellR
+      const ex = x
+      const ey = y - camY
+      const ez = z - camZ
+      const invZ = 1 / Math.max(0.35, -ez)
+      const ndcX = f * ex * invZ
+      const ndcY = f * ey * invZ
+      let u = ndcX * 0.5 + 0.5
+      let v = -ndcY * 0.5 + 0.5
+      u = inset + u * (1 - inset * 2)
+      v = inset + v * (1 - inset * 2)
+      const p = bilinearInQuad(u, v, useQuad.tl, useQuad.tr, useQuad.br, useQuad.bl)
+      vals[b] = sampleLumaAt(data, W, H, p.x, p.y)
+    }
+    return vals
+  }
+
+  // Try a few projection scales; keep the one with best SYNC@0 after thresholding.
+  let bestBits = null
+  let bestScore = -1
+  let bestVals = null
+  for(const shellR of [0.84, 0.90, 0.96]){
+    for(const fovDeg of [36, 38, 40]){
+      const vals = sampleVals(shellR, fovDeg * Math.PI / 180)
+      const bits = bitsFromVals(vals)
+      const score = syncScoreAt(bits, 0)
+      if(score > bestScore){
+        bestScore = score
+        bestBits = bits
+        bestVals = vals
+      }
+      if(score >= 30) break
+    }
+    if(bestScore >= 30) break
   }
 
   if(!decodeBitAccum) decodeBitAccum = new Float32Array(DATA_COUNT)
-  for(let i = 0; i < DATA_COUNT; i++) decodeBitAccum[i] += vals[i]
+  if(bestVals){
+    for(let i = 0; i < DATA_COUNT; i++) decodeBitAccum[i] += bestVals[i]
+  }
   decodeBitFrames++
   if(decodeBitFrames > DECODE_ACCUM_MAX){
     const keep = DECODE_ACCUM_MAX - 1
@@ -1011,6 +1045,8 @@ function sampleCloudBitsFromVideo(){
   sampleCloudBitsFromVideo._meta = { quad: useQuad, aligned: !!quad }
 
   if(decodeBitFrames < DECODE_ACCUM_MIN) return null
+  // Prefer freshly scored bits if already strong; else re-threshold the accum.
+  if(bestScore >= 28 && bestBits) return bestBits
   return bitsFromAccum(decodeBitAccum, decodeBitFrames)
 }
 
@@ -1283,13 +1319,13 @@ function bitsToPayload(bits){
   if(!bits || bits.length < SYNC.length + 16) return null
   const candidates = []
   let bestOk = 0
-  // Prefer starts near 0 — real frames always begin with SYNC.
   const limit = bits.length - SYNC.length
   for(let i = 0; i <= limit; i++){
-    let ok = 0
-    for(let j = 0; j < SYNC.length; j++) if(bits[i + j] === SYNC[j]) ok++
+    const ok = syncScoreAt(bits, i)
     if(ok > bestOk) bestOk = ok
-    if(ok >= 26 || (i <= 8 && ok >= 22)) candidates.push({ i, ok })
+    // Real frames start with SYNC — ignore mid/end false matches unless nearly perfect.
+    if(i <= 12 && ok >= 20) candidates.push({ i, ok })
+    else if(ok >= 30) candidates.push({ i, ok })
   }
   decodeDbg.sync = bestOk
   if(!candidates.length){
@@ -1303,7 +1339,7 @@ function bitsToPayload(bits){
   for(const cand of candidates){
     if(seen.has(cand.i)) continue
     seen.add(cand.i)
-    if(seen.size > 12) break
+    if(seen.size > 8) break
     const bodyBits = bits.slice(cand.i + SYNC.length)
     const maxBytes = Math.min(520, (bodyBits.length / 8) | 0)
     for(let blen = 8; blen <= maxBytes; blen++){
