@@ -908,13 +908,15 @@ function tryFinishFountain(){
   const finalBytes = rxMeta.size != null ? merged.slice(0, rxMeta.size) : merged
   const blob = new Blob([finalBytes], { type: rxMeta.type || "application/octet-stream" })
   const url = URL.createObjectURL(blob)
+  const rawName = String(rxMeta.name || "recovered_file").trim() || "recovered_file"
+  const safeName = rawName.replace(/[/\\?%*:|"<>]/g, "_")
   downloadLink.href = url
-  downloadLink.download = rxMeta.name || "recovered_file"
+  downloadLink.download = safeName
   downloadLink.hidden = false
   progressBar.style.width = "100%"
   progressText.textContent = "Done"
   setStatus(
-    `Recovered “${downloadLink.download}” (${finalBytes.length} bytes) · ` +
+    `Recovered “${safeName}” (${finalBytes.length} bytes) · ` +
     `${rxSymbols.size}/${rxN} QRs (need ${rxK})`
   )
   try{ downloadLink.click() }catch(_){}
