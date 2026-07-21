@@ -4,6 +4,7 @@
  */
 const canvasWrap = document.getElementById("canvasWrap")
 const cloudCanvas = document.getElementById("cloud")
+const qrImg = document.getElementById("qrImg")
 const qrCanvas = document.getElementById("qrCanvas")
 const fileInput = document.getElementById("fileInput")
 const modeButtons = document.getElementById("modeButtons")
@@ -167,45 +168,35 @@ function b64ToBytes(b64){
 }
 
 function getQrCode(){
-  const fn = globalThis.qrcode
-  if(typeof fn !== "function") throw new Error("qrcode-generator not loaded")
+  const fn = globalThis.qrcode || window.qrcode
+  if(typeof fn !== "function"){
+    throw new Error("qrcode-generator not loaded (globalThis.qrcode missing)")
+  }
   return fn
 }
 
 function getJsQR(){
-  return typeof globalThis.jsQR === "function" ? globalThis.jsQR : null
+  return typeof (globalThis.jsQR || window.jsQR) === "function"
+    ? (globalThis.jsQR || window.jsQR)
+    : null
 }
 
+/** Render QR into the visible <img> via GIF data-URL (no canvas required). */
 function drawQrToCanvas(text){
   const qrcode = getQrCode()
   const qr = qrcode(0, QR_ECC)
-  qr.addData(text, "Byte")
+  qr.addData(String(text), "Byte")
   qr.make()
-  const n = qr.getModuleCount()
-  const canvas = qrCanvas
-  if(!canvas) throw new Error("qrCanvas missing")
-  canvas.width = QR_PIXEL
-  canvas.height = QR_PIXEL
-  const ctx = canvas.getContext("2d")
-  const margin = Math.floor(QR_PIXEL * 0.08)
-  const cell = (QR_PIXEL - margin * 2) / n
-  ctx.fillStyle = "#ffffff"
-  ctx.fillRect(0, 0, QR_PIXEL, QR_PIXEL)
-  ctx.fillStyle = "#000000"
-  for(let r = 0; r < n; r++){
-    for(let c = 0; c < n; c++){
-      if(qr.isDark(r, c)){
-        const x = margin + c * cell
-        const y = margin + r * cell
-        ctx.fillRect(x, y, cell + 0.6, cell + 0.6)
-      }
-    }
-  }
+  if(!qrImg) throw new Error("qrImg missing from DOM")
+  // cell size 8, margin 4 modules — crisp on Retina when scaled with object-fit
+  qrImg.src = qr.createDataURL(8, 4)
+  qrImg.hidden = false
+  qrImg.style.display = "block"
 }
 
 function showQrUi(){
   if(cloudCanvas) cloudCanvas.hidden = true
-  qrCanvas.hidden = false
+  if(qrImg) qrImg.hidden = false
   canvasWrap.classList.add("tx-paper")
   canvasWrap.style.display = ""
   videoWrap.hidden = true
@@ -762,14 +753,34 @@ async function decodeLoop(){
   }
 }
 
-// Boot
-if(cloudCanvas) cloudCanvas.hidden = true
-qrCanvas.hidden = false
-canvasWrap.classList.add("tx-paper")
-try{
-  drawQrToCanvas("PartiCl QR ready — Encode a file")
-  setStatus("QR mode · Encode a file to stream QR frames — or Decode with the camera.")
-}catch(err){
-  console.error(err)
-  setStatus(`QR library failed to load: ${err.message || err}`)
+// Boot — wait a tick so classic vendor scripts definitely finished
+function bootQr(){
+  if(cloudCanvas) cloudCanvas.hidden = true
+  canvasWrap.classList.add("tx-paper")
+  try{
+    if(typeof (globalThis.qrcode || window.qrcode) !== "function"){
+      throw new Error("vendor/qrcode/qrcode.js did not expose window.qrcode")
+    }
+    drawQrToCanvas("PartiCl QR ready - Encode a file")
+    setStatus("QR mode · Encode a file to stream QR frames — or Decode with the camera.")
+  }catch(err){
+    console.error(err)
+    setStatus(`QR library failed: ${err.message || err}`)
+    if(qrImg){
+      // Visible failure pattern so the box is never blank white
+      qrImg.src = "data:image/svg+xml," + encodeURIComponent(
+        `<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512">
+          <rect width="100%" height="100%" fill="#fff"/>
+          <rect x="32" y="32" width="448" height="448" fill="none" stroke="#000" stroke-width="16"/>
+          <text x="256" y="250" text-anchor="middle" font-size="28" font-family="sans-serif">QR lib failed</text>
+          <text x="256" y="290" text-anchor="middle" font-size="18" font-family="sans-serif">check console</text>
+        </svg>`
+      )
+    }
+  }
+}
+if(document.readyState === "loading"){
+  document.addEventListener("DOMContentLoaded", () => setTimeout(bootQr, 0))
+}else{
+  setTimeout(bootQr, 0)
 }
