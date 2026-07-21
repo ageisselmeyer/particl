@@ -21,7 +21,7 @@
 <body>
   <header>
     <h1>PartiCl</h1>
-    <p class="tagline">Particle cloud transfer · <span id="buildId">545527</span></p>
+    <p class="tagline">Particle cloud transfer · <span id="buildId">973832</span></p>
   </header>
 
   <input type="file" id="fileInput" hidden>
@@ -60,25 +60,43 @@
   <p id="status"></p>
   <a id="download" hidden>Download recovered file</a>
 
-  <div id="decodeChecklist" hidden aria-live="polite">
-    <div class="checkRow" id="chkCorners" data-state="bad">
-      <span class="chkMark" aria-hidden="true">&#10006;</span>
-      <span class="chkLabel" id="chkCornersLabel">Corners locked</span>
+  <div id="decodeMeters" hidden aria-live="polite">
+    <div class="meterRow">
+      <div class="meterHead">
+        <span class="meterLabel">Align</span>
+        <span class="meterValue" id="meterAlignVal">0%</span>
+      </div>
+      <div class="meterTrack"><div class="meterFill" id="meterAlignFill"></div></div>
     </div>
-    <div class="checkRow" id="chkPayload" data-state="bad">
-      <span class="chkMark" aria-hidden="true">&#10006;</span>
-      <span class="chkLabel" id="chkPayloadLabel">Valid payload (CRC/SYNC)</span>
+    <div class="meterRow">
+      <div class="meterHead">
+        <span class="meterLabel">SYNC match</span>
+        <span class="meterValue" id="meterSyncVal">0/32</span>
+      </div>
+      <div class="meterTrack">
+        <div class="meterFill meterFillSync" id="meterSyncFill"></div>
+        <div class="meterPeak" id="meterSyncPeak"></div>
+      </div>
     </div>
-    <div class="checkRow" id="chkReady" data-state="bad">
-      <span class="chkMark" aria-hidden="true">&#10006;</span>
-      <span class="chkLabel" id="chkReadyLabel">Decoding ready</span>
+    <div class="meterRow">
+      <div class="meterHead">
+        <span class="meterLabel">Signal contrast</span>
+        <span class="meterValue" id="meterContrastVal">0</span>
+      </div>
+      <div class="meterTrack"><div class="meterFill" id="meterContrastFill"></div></div>
     </div>
-    <div class="checkRow" id="chkRecovered" data-state="bad">
-      <span class="chkMark" aria-hidden="true">&#10006;</span>
-      <span class="chkLabel" id="chkRecoveredLabel">File recovered</span>
+    <div class="meterRow">
+      <div class="meterHead">
+        <span class="meterLabel">CRC / payload</span>
+        <span class="meterValue" id="meterCrcVal">searching</span>
+      </div>
+      <div class="meterTrack">
+        <div class="meterFill meterFillCrc" id="meterCrcFill"></div>
+        <div class="meterPeak" id="meterCrcPeak"></div>
+      </div>
     </div>
   </div>
 
-  <script type="module" src="app.js?v=545527"></script>
+  <script type="module" src="app.js?v=973832"></script>
 </body>
 </html>

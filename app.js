@@ -17,15 +17,17 @@ const progressBar = document.getElementById("decodeProgressBar")
 const progressText = document.getElementById("decodeProgressText")
 const lockQuadEl = document.getElementById("lockQuad")
 const decodeDebugEl = document.getElementById("decodeDebug")
-const decodeChecklistEl = document.getElementById("decodeChecklist")
-const chkCornersRow = document.getElementById("chkCorners")
-const chkPayloadRow = document.getElementById("chkPayload")
-const chkReadyRow = document.getElementById("chkReady")
-const chkRecoveredRow = document.getElementById("chkRecovered")
-const chkCornersLabel = document.getElementById("chkCornersLabel")
-const chkPayloadLabel = document.getElementById("chkPayloadLabel")
-const chkReadyLabel = document.getElementById("chkReadyLabel")
-const chkRecoveredLabel = document.getElementById("chkRecoveredLabel")
+const decodeMetersEl = document.getElementById("decodeMeters")
+const meterAlignFill = document.getElementById("meterAlignFill")
+const meterAlignVal = document.getElementById("meterAlignVal")
+const meterSyncFill = document.getElementById("meterSyncFill")
+const meterSyncVal = document.getElementById("meterSyncVal")
+const meterSyncPeak = document.getElementById("meterSyncPeak")
+const meterContrastFill = document.getElementById("meterContrastFill")
+const meterContrastVal = document.getElementById("meterContrastVal")
+const meterCrcFill = document.getElementById("meterCrcFill")
+const meterCrcVal = document.getElementById("meterCrcVal")
+const meterCrcPeak = document.getElementById("meterCrcPeak")
 
 document.getElementById("btnEncode").addEventListener("click", () => {
   fileInput.value = ""
@@ -1070,75 +1072,98 @@ function resetRxState(){
   rxRecovered = false
 }
 
-function setCheckRow(rowEl, ok, markEl, labelEl, labelText){
-  if(!rowEl) return
-  rowEl.dataset.state = ok ? "ok" : "bad"
-  if(markEl){
-    // ✓ / ✗ (HTML entity output kept ASCII-safe)
-    markEl.textContent = ok ? "\u2713" : "\u2717"
-  }
-  if(labelEl && labelText != null) labelEl.textContent = labelText
+const decodeQuality = {
+  syncPeak: 0,
+  contrastPeak: 0,
+  alignPeak: 0,
+  crcPeak: 0,
+  crcScore: 0
 }
 
-function updateDecodeChecklist(){
-  if(!decodeChecklistEl) return
+function resetDecodeQuality(){
+  decodeQuality.syncPeak = 0
+  decodeQuality.contrastPeak = 0
+  decodeQuality.alignPeak = 0
+  decodeQuality.crcPeak = 0
+  decodeQuality.crcScore = 0
+}
 
-  const cornersOk = !!decodeAlignLocked || decodeDbg.align === "region" || decodeDbg.align === "sticky"
-  const cornersLabel = decodeDbg.align === "locked"
-    ? "Corners locked"
-    : decodeDbg.align === "region"
-      ? "Cloud region locked"
-      : decodeDbg.align === "sticky"
-        ? "Corners sticky"
-        : "Find cyan corners"
-  setCheckRow(
-    chkCornersRow,
-    cornersOk,
-    chkCornersRow?.querySelector(".chkMark"),
-    chkCornersLabel,
-    cornersLabel
+function setMeter(fillEl, valEl, peakEl, pct, label, peakPct){
+  const p = Math.max(0, Math.min(100, pct))
+  if(fillEl) fillEl.style.width = p + "%"
+  if(valEl && label != null) valEl.textContent = label
+  if(peakEl && peakPct != null) peakEl.style.left = Math.max(0, Math.min(100, peakPct)) + "%"
+}
+
+function updateDecodeMeters(){
+  if(!decodeMetersEl) return
+
+  let alignPct = 0
+  if(decodeDbg.align === "locked") alignPct = 100
+  else if(decodeDbg.align === "sticky") alignPct = 70
+  else if(decodeDbg.align === "region") alignPct = 55
+  else alignPct = Math.max(0, 25 - Math.min(25, decodeDbg.miss / 40))
+  if(alignPct > decodeQuality.alignPeak) decodeQuality.alignPeak = alignPct
+  setMeter(
+    meterAlignFill,
+    meterAlignVal,
+    null,
+    alignPct,
+    `${Math.round(alignPct)}% · ${decodeDbg.align}`
   )
 
-  const payloadLabel = rxFountain
-    ? "Valid PC6 symbol (CRC/SYNC)"
-    : "Valid payload (CRC/SYNC)"
-  setCheckRow(
-    chkPayloadRow,
-    !!rxPayloadOk,
-    chkPayloadRow?.querySelector(".chkMark"),
-    chkPayloadLabel,
-    payloadLabel
+  const syncNow = decodeDbg.sync || 0
+  if(syncNow > decodeQuality.syncPeak) decodeQuality.syncPeak = syncNow
+  const syncPct = (syncNow / 32) * 100
+  const syncPeakPct = (decodeQuality.syncPeak / 32) * 100
+  setMeter(
+    meterSyncFill,
+    meterSyncVal,
+    meterSyncPeak,
+    syncPct,
+    `${syncNow}/32 · best ${decodeQuality.syncPeak}/32`,
+    syncPeakPct
   )
 
-  let readyOk = false
-  if(rxFountain){
-    readyOk = fountainDecodeReady()
-  }else if(rxTotal != null){
-    readyOk = rxHave.size >= rxTotal
+  // Contrast: useful optical separation; peak ~30+ is strong on phone captures.
+  const contrast = decodeDbg.std || 0
+  if(contrast > decodeQuality.contrastPeak) decodeQuality.contrastPeak = contrast
+  const contrastPct = Math.min(100, (contrast / 40) * 100)
+  setMeter(
+    meterContrastFill,
+    meterContrastVal,
+    null,
+    contrastPct,
+    `${contrast.toFixed(1)} · best ${decodeQuality.contrastPeak.toFixed(1)}`
+  )
+
+  // CRC meter: rises with SYNC@0 quality (getting closer), snaps to 100 on CRC ok.
+  let crcScore = 0
+  if(rxRecovered || decodeDbg.crc === "ok" || rxPayloadOk){
+    crcScore = 100
+  }else{
+    // Map SYNC 0..32 → 0..85, reserving the top for a real CRC hit.
+    crcScore = Math.min(85, Math.round((syncNow / 32) * 85))
+    if(decodeDbg.crc === "fail" && syncNow >= 24) crcScore = Math.max(crcScore, 60)
+    if(rxFountain && rxSymbols.size > 0){
+      const need = rxK || 1
+      crcScore = Math.max(crcScore, Math.min(95, Math.round((rxSymbols.size / need) * 95)))
+    }
   }
-
-  const readyLabel = rxFountain
-    ? (rxK != null
-      ? `Decoding ready (${countUniqueSources()}/${rxK} sources)`
-      : "Decoding ready (waiting for PC6 meta)")
-    : (rxTotal != null
-      ? `All frames received (${rxHave.size}/${rxTotal})`
-      : "Decoding ready (waiting for PC5 meta)")
-
-  setCheckRow(
-    chkReadyRow,
-    readyOk,
-    chkReadyRow?.querySelector(".chkMark"),
-    chkReadyLabel,
-    readyLabel
-  )
-
-  setCheckRow(
-    chkRecoveredRow,
-    !!rxRecovered,
-    chkRecoveredRow?.querySelector(".chkMark"),
-    chkRecoveredLabel,
-    rxRecovered ? "File recovered" : "File recovered"
+  decodeQuality.crcScore = crcScore
+  if(crcScore > decodeQuality.crcPeak) decodeQuality.crcPeak = crcScore
+  const crcLabel = rxRecovered
+    ? "recovered"
+    : decodeDbg.crc === "ok"
+      ? "CRC ok"
+      : `~${crcScore}% · best ${decodeQuality.crcPeak}%`
+  setMeter(
+    meterCrcFill,
+    meterCrcVal,
+    meterCrcPeak,
+    crcScore,
+    crcLabel,
+    decodeQuality.crcPeak
   )
 }
 
@@ -1279,7 +1304,7 @@ function tryFinishFountain(){
   )
   try{ downloadLink.click() }catch(_){}
   rxRecovered = true
-  updateDecodeChecklist()
+  updateDecodeMeters()
   decodeRunning = false
   return true
 }
@@ -1310,7 +1335,7 @@ function tryFinish(){
   setStatus(`Recovered “${downloadLink.download}” (${finalBytes.length} bytes).`)
   try{ downloadLink.click() }catch(_){}
   rxRecovered = true
-  updateDecodeChecklist()
+  updateDecodeMeters()
   decodeRunning = false
   return true
 }
@@ -1423,7 +1448,8 @@ async function startDecoder(){
   decodeFrameNo = 0
   progressBar.style.width = "0%"
   progressText.textContent = "Frames: 0"
-  if(decodeChecklistEl) decodeChecklistEl.hidden = false
+  if(decodeMetersEl) decodeMetersEl.hidden = false
+  resetDecodeQuality()
   if(decodeDebugEl){
     decodeDebugEl.hidden = false
     decodeDbg.last = "decoder started"
@@ -1435,7 +1461,7 @@ async function startDecoder(){
     decodeDbg.accum = 0
     updateDecodeDebug()
   }
-  updateDecodeChecklist()
+  updateDecodeMeters()
 
   let captureSettings = {}
   try{
@@ -1511,7 +1537,7 @@ async function decodeLoop(){
     progressBar.style.width = Math.min(100, Math.floor((have / rxTotal) * 100)) + "%"
   }
 
-  updateDecodeChecklist()
+  updateDecodeMeters()
   updateDecodeDebug()
 
   // Primary: sample cloud bits
