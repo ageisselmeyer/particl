@@ -771,27 +771,27 @@ function findCornerCentroid(data, W, H, x0, y0, w, h){
       const r8 = data[p], g = data[p + 1], b = data[p + 2]
       const peak = Math.max(r8, g, b)
       const sat = peak - Math.min(r8, g, b)
-      // Glossy screen: skip white specular blobs (they are not cyan brackets).
-      if(peak > 210 && sat < 35 && r8 > peak * 0.88) continue
-      const cyan = Math.max(0, (g + b) * 0.5 - r8 * 0.35)
-      if(cyan < 18) continue
-      // Soft cyan bias — phone cameras often wash brackets toward white-blue.
-      const blueBias = (b + g) - r8 * 1.5
-      if(blueBias < 8) continue
-      const weight = cyan * 0.7 + blueBias * 0.3 + sat * 0.15
-      if(weight < 16) continue
+      // True cyan brackets: G and B clearly above R (rejects white/gray keys).
+      if(!(g > r8 + 18 && b > r8 + 18)) continue
+      if(Math.abs(g - b) > 55) continue
+      if(sat < 25) continue
+      if(peak > 210 && sat < 40 && r8 > peak * 0.75) continue
+      const cyan = (g + b) * 0.5 - r8
+      if(cyan < 30) continue
+      const weight = cyan * (0.6 + 0.4 * Math.min(1, sat / 100))
+      if(weight < 28) continue
       sx += x * weight
       sy += y * weight
       wsum += weight
     }
   }
-  if(wsum < 25) return null
+  if(wsum < 80) return null
   return { x: sx / wsum, y: sy / wsum }
 }
 
 function detectAlignQuad(data, W, H, rect){
   const { ox, oy, dw, dh } = rect
-  // Prefer the bright cloud/Mac region (portrait cameras place it mid-frame).
+  // Search cyan brackets near the bright region if found, else full frame corners.
   const region = findBrightRegion(data, W, H, ox, oy, dw, dh)
   const rx = region ? region.x : ox
   const ry = region ? region.y : oy
@@ -802,27 +802,17 @@ function detectAlignQuad(data, W, H, rect){
   const cTR = findCornerCentroid(data, W, H, (rx + rw - pad) | 0, ry | 0, pad, pad)
   const cBR = findCornerCentroid(data, W, H, (rx + rw - pad) | 0, (ry + rh - pad) | 0, pad, pad)
   const cBL = findCornerCentroid(data, W, H, rx | 0, (ry + rh - pad) | 0, pad, pad)
-  if(cTL && cTR && cBR && cBL){
-    const q = orderQuadCorners([cTL, cTR, cBR, cBL])
-    const wTop = Math.hypot(q.tr.x - q.tl.x, q.tr.y - q.tl.y)
-    const wBot = Math.hypot(q.br.x - q.bl.x, q.br.y - q.bl.y)
-    const hL = Math.hypot(q.bl.x - q.tl.x, q.bl.y - q.tl.y)
-    const hR = Math.hypot(q.br.x - q.tr.x, q.br.y - q.tr.y)
-    const minSide = Math.min(wTop, wBot, hL, hR)
-    const maxSide = Math.max(wTop, wBot, hL, hR)
-    if(minSide >= Math.min(rw, rh) * 0.35 && maxSide <= minSide * 1.75) return q
-  }
-  // Soft lock: sample through the bright Mac-window region even without brackets.
-  if(region && Math.min(rw, rh) > Math.min(dw, dh) * 0.15){
-    return {
-      tl: { x: rx, y: ry },
-      tr: { x: rx + rw, y: ry },
-      br: { x: rx + rw, y: ry + rh },
-      bl: { x: rx, y: ry + rh },
-      _soft: true
-    }
-  }
-  return null
+  if(!(cTL && cTR && cBR && cBL)) return null
+  const q = orderQuadCorners([cTL, cTR, cBR, cBL])
+  const wTop = Math.hypot(q.tr.x - q.tl.x, q.tr.y - q.tl.y)
+  const wBot = Math.hypot(q.br.x - q.bl.x, q.br.y - q.bl.y)
+  const hL = Math.hypot(q.bl.x - q.tl.x, q.bl.y - q.tl.y)
+  const hR = Math.hypot(q.br.x - q.tr.x, q.br.y - q.tr.y)
+  const minSide = Math.min(wTop, wBot, hL, hR)
+  const maxSide = Math.max(wTop, wBot, hL, hR)
+  if(minSide < Math.min(rw, rh) * 0.4) return null
+  if(maxSide > minSide * 1.55) return null
+  return q
 }
 
 function sampleLumaAt(data, W, H, x, y){
@@ -867,44 +857,43 @@ function bitsFromVals(vals){
   decodeDbg.mean = mean
   decodeDbg.std = std
 
-  let bestBits = null
-  let bestScore = -1
-  let bestThr = mean
-  let bestConf = null
-  const lo = mean - std * 1.2
-  const hi = mean + std * 1.2
-  for(let s = 0; s < 17; s++){
-    const thr = lo + (hi - lo) * (s / 16)
-    let bits = ""
-    const conf = new Float32Array(DATA_COUNT)
-    for(let i = 0; i < DATA_COUNT; i++){
-      bits += vals[i] > thr ? "1" : "0"
-      conf[i] = Math.abs(vals[i] - thr)
-    }
-    const score = syncScoreAt(bits, 0)
-    if(score > bestScore){
-      bestScore = score
-      bestBits = bits
-      bestThr = thr
-      bestConf = conf
-    }
+  // Independent Otsu threshold — do NOT maximize SYNC (that invents ~26/32 on noise).
+  const bins = new Int32Array(32)
+  let vmin = Infinity, vmax = -Infinity
+  for(let i = 0; i < DATA_COUNT; i++){
+    if(vals[i] < vmin) vmin = vals[i]
+    if(vals[i] > vmax) vmax = vals[i]
   }
-  if(bestScore < 30 && bestBits){
-    for(const slip of [1, 2, 3]){
-      const shifted = "0".repeat(slip) + bestBits.slice(0, DATA_COUNT - slip)
-      const score = syncScoreAt(shifted, 0)
-      if(score > bestScore){
-        bestScore = score
-        bestBits = shifted
-      }
-    }
+  const span = Math.max(1e-3, vmax - vmin)
+  for(let i = 0; i < DATA_COUNT; i++){
+    bins[Math.min(31, ((vals[i] - vmin) / span * 31) | 0)]++
   }
-  decodeDbg.sync = bestScore
-  decodeDbg.last = `thr ${bestThr.toFixed(1)} · SYNC0 ${bestScore}/32`
-  bitsFromVals._thr = bestThr
-  bitsFromVals._conf = bestConf
+  let w0 = 0, sum0 = 0, bestT = 15, bestVar = -1, sumBins = 0
+  for(let b = 0; b < 32; b++) sumBins += b * bins[b]
+  for(let t = 0; t < 31; t++){
+    w0 += bins[t]
+    if(!w0) continue
+    sum0 += t * bins[t]
+    const w1 = DATA_COUNT - w0
+    if(!w1) break
+    const m0 = sum0 / w0, m1 = (sumBins - sum0) / w1
+    const between = w0 * w1 * (m0 - m1) * (m0 - m1)
+    if(between > bestVar){ bestVar = between; bestT = t }
+  }
+  const thr = vmin + ((bestT + 0.5) / 31) * span
+  let bits = ""
+  const conf = new Float32Array(DATA_COUNT)
+  for(let i = 0; i < DATA_COUNT; i++){
+    bits += vals[i] > thr ? "1" : "0"
+    conf[i] = Math.abs(vals[i] - thr)
+  }
+  const score = syncScoreAt(bits, 0)
+  decodeDbg.sync = score
+  decodeDbg.last = `otsu ${thr.toFixed(1)} · SYNC0 ${score}/32 (rand~16)`
+  bitsFromVals._thr = thr
+  bitsFromVals._conf = conf
   bitsFromVals._vals = vals
-  return bestBits
+  return bits
 }
 
 function bitsFromAccum(accum, frames){
@@ -965,11 +954,11 @@ function sampleCloudBitsFromVideo(){
     lastGoodQuad = quad
     lastGoodQuadAge = 0
     decodeAlignMiss = 0
-    decodeAlignLocked = !quad._soft
-    decodeDbg.align = quad._soft ? "region" : "locked"
+    decodeAlignLocked = true
+    decodeDbg.align = "locked"
     decodeDbg.sticky = 0
     updateLockOverlay(useQuad, overlayMeta)
-  }else if(lastGoodQuad && lastGoodQuadAge < 18){
+  }else if(lastGoodQuad && lastGoodQuadAge < 12){
     // Glare can temporarily hide the corners; re-use the last stable quad.
     useQuad = lastGoodQuad
     lastGoodQuadAge++
@@ -1080,7 +1069,8 @@ function sampleCloudBitsFromVideo(){
   sampleCloudBitsFromVideo._meta = { quad: useQuad, aligned: !!quad }
 
   if(decodeBitFrames < DECODE_ACCUM_MIN) return null
-  if(bestScore >= 28 && bestBits) return bestBits
+  // Only trust a fresh decode when SYNC is well above chance (~16).
+  if(bestScore >= 28 && bestBits && decodeAlignLocked) return bestBits
   return bitsFromAccum(decodeBitAccum, decodeBitFrames)
 }
 
@@ -1130,11 +1120,11 @@ function setMeter(fillEl, valEl, peakEl, pct, label, peakPct){
 function updateDecodeMeters(){
   if(!decodeMetersEl) return
 
+  // Only real cyan-corner lock counts as high align (not "bright keyboard" soft locks).
   let alignPct = 0
   if(decodeDbg.align === "locked") alignPct = 100
-  else if(decodeDbg.align === "sticky") alignPct = 70
-  else if(decodeDbg.align === "region") alignPct = 55
-  else alignPct = Math.max(0, 25 - Math.min(25, decodeDbg.miss / 40))
+  else if(decodeDbg.align === "sticky") alignPct = 55
+  else alignPct = 0
   if(alignPct > decodeQuality.alignPeak) decodeQuality.alignPeak = alignPct
   setMeter(
     meterAlignFill,
@@ -1145,19 +1135,20 @@ function updateDecodeMeters(){
   )
 
   const syncNow = decodeDbg.sync || 0
+  // Chance baseline ~16/32; only scores well above that are meaningful.
+  const syncSignal = Math.max(0, syncNow - 16)
   if(syncNow > decodeQuality.syncPeak) decodeQuality.syncPeak = syncNow
-  const syncPct = (syncNow / 32) * 100
-  const syncPeakPct = (decodeQuality.syncPeak / 32) * 100
+  const syncPct = (syncSignal / 16) * 100
+  const syncPeakPct = (Math.max(0, decodeQuality.syncPeak - 16) / 16) * 100
   setMeter(
     meterSyncFill,
     meterSyncVal,
     meterSyncPeak,
     syncPct,
-    `${syncNow}/32 · best ${decodeQuality.syncPeak}/32`,
+    `${syncNow}/32 · best ${decodeQuality.syncPeak}/32 · chance~16`,
     syncPeakPct
   )
 
-  // Contrast: useful optical separation; peak ~30+ is strong on phone captures.
   const contrast = decodeDbg.std || 0
   if(contrast > decodeQuality.contrastPeak) decodeQuality.contrastPeak = contrast
   const contrastPct = Math.min(100, (contrast / 40) * 100)
@@ -1169,32 +1160,31 @@ function updateDecodeMeters(){
     `${contrast.toFixed(1)} · best ${decodeQuality.contrastPeak.toFixed(1)}`
   )
 
-  // CRC meter: rises with SYNC@0 quality (getting closer), snaps to 100 on CRC ok.
+  // CRC meter: only real payload progress — not inflated by fake SYNC.
   let crcScore = 0
+  let crcLabel = "waiting"
   if(rxRecovered || decodeDbg.crc === "ok" || rxPayloadOk){
     crcScore = 100
+    crcLabel = rxRecovered ? "recovered" : "CRC ok"
+  }else if(rxFountain && rxSymbols.size > 0){
+    const need = rxK || 1
+    crcScore = Math.min(95, Math.round((rxSymbols.size / need) * 95))
+    crcLabel = `${rxSymbols.size}/${need} symbols`
+  }else if(decodeDbg.align === "locked" && syncNow >= 28 && contrast >= 18){
+    crcScore = Math.min(40, Math.round(((syncNow - 28) / 4) * 40))
+    crcLabel = `close · SYNC ${syncNow}/32`
   }else{
-    // Map SYNC 0..32 → 0..85, reserving the top for a real CRC hit.
-    crcScore = Math.min(85, Math.round((syncNow / 32) * 85))
-    if(decodeDbg.crc === "fail" && syncNow >= 24) crcScore = Math.max(crcScore, 60)
-    if(rxFountain && rxSymbols.size > 0){
-      const need = rxK || 1
-      crcScore = Math.max(crcScore, Math.min(95, Math.round((rxSymbols.size / need) * 95)))
-    }
+    crcScore = 0
+    crcLabel = "no lock"
   }
   decodeQuality.crcScore = crcScore
   if(crcScore > decodeQuality.crcPeak) decodeQuality.crcPeak = crcScore
-  const crcLabel = rxRecovered
-    ? "recovered"
-    : decodeDbg.crc === "ok"
-      ? "CRC ok"
-      : `~${crcScore}% · best ${decodeQuality.crcPeak}%`
   setMeter(
     meterCrcFill,
     meterCrcVal,
     meterCrcPeak,
     crcScore,
-    crcLabel,
+    `${crcLabel} · best ${decodeQuality.crcPeak}%`,
     decodeQuality.crcPeak
   )
 }
