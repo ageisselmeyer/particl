@@ -13,7 +13,7 @@
 <body>
   <header>
     <h1>PartiCl</h1>
-    <p class="tagline">Dot QR · MDS · <span id="buildId">154660</span></p>
+    <p class="tagline">Dot QR · MDS · <span id="buildId">154670</span></p>
   </header>
 
   <input type="file" id="fileInput" hidden>
@@ -95,8 +95,7 @@
   <script src="vendor/jsqr/jsQR.js"></script>
   <script src="vendor/zxing/zxing.min.js"></script>
   <script>
-    // White paper + black circular modules (previous dot style).
-    // Decoder uses ZXing + morphological dilate, which recovers all-dot QRs.
+    // Circular dot QR with classic square finder corners (three eyes stay put).
     window.__particlPaintCloud = function(text){
       var c = document.getElementById("cloud");
       var wrap = document.getElementById("canvasWrap");
@@ -126,25 +125,57 @@
       if(!ctx) return false;
       ctx.fillStyle = "#ffffff";
       ctx.fillRect(0, 0, size, size);
-      ctx.fillStyle = "#000000";
+
       var origin = quiet * cell;
-      var rad = cell * 0.48;
+      var mid = (n - 1) / 2;
+      // Disk clears the three 7×7 finder corners; slight overlap looks intentional
+      var diskR = mid - 2.6;
+      var diskR2 = diskR * diskR;
+      var dotRad = cell * 0.48;
+
+      function inPat(rr, cc){ return rr >= 0 && rr < 7 && cc >= 0 && cc < 7; }
+      function isFinder(r, col){
+        return inPat(r, col) || inPat(r, col - (n - 7)) || inPat(r - (n - 7), col);
+      }
+      function inDisk(r, col){
+        var dr = r - mid, dc = col - mid;
+        return (dr * dr + dc * dc) <= diskR2;
+      }
+
+      // Soft circular guide (very light)
+      var cx = origin + (mid + 0.5) * cell;
+      var cy = origin + (mid + 0.5) * cell;
+      ctx.beginPath();
+      ctx.arc(cx, cy, diskR * cell + cell * 0.35, 0, Math.PI * 2);
+      ctx.strokeStyle = "rgba(0,0,0,0.06)";
+      ctx.lineWidth = Math.max(1, cell * 0.08);
+      ctx.stroke();
+
+      ctx.fillStyle = "#000000";
       for(var r = 0; r < n; r++){
         for(var col = 0; col < n; col++){
           if(!qr.isDark(r, col)) continue;
-          var x = origin + (col + 0.5) * cell;
-          var y = origin + (r + 0.5) * cell;
-          ctx.beginPath();
-          ctx.arc(x, y, rad, 0, Math.PI * 2);
-          ctx.fill();
+          var finder = isFinder(r, col);
+          // Keep finders + timing (row/col 6); other modules only inside the circle
+          if(!finder && r !== 6 && col !== 6 && !inDisk(r, col)) continue;
+
+          var x0 = origin + col * cell;
+          var y0 = origin + r * cell;
+          if(finder){
+            ctx.fillRect(x0, y0, cell, cell);
+          }else{
+            ctx.beginPath();
+            ctx.arc(x0 + cell * 0.5, y0 + cell * 0.5, dotRad, 0, Math.PI * 2);
+            ctx.fill();
+          }
         }
       }
       return true;
     };
     window.__particlPaintCloud("PartiCl QR ready - Encode a file");
     var st = document.getElementById("status");
-    if(st) st.textContent = "Boot dot-QR painted · loading module…";
+    if(st) st.textContent = "Boot circular dot-QR · loading module…";
   </script>
-  <script type="module" src="app-qr.js?v=154660"></script>
+  <script type="module" src="app-qr.js?v=154670"></script>
 </body>
 </html>
