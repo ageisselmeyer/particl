@@ -13,7 +13,7 @@
 <body>
   <header>
     <h1>PartiCl</h1>
-    <p class="tagline">Dot QR · MDS · <span id="buildId">154680</span></p>
+    <p class="tagline">Dot QR · MDS · <span id="buildId">154690</span></p>
   </header>
 
   <input type="file" id="fileInput" hidden>
@@ -95,8 +95,7 @@
   <script src="vendor/jsqr/jsQR.js"></script>
   <script src="vendor/zxing/zxing.min.js"></script>
   <script>
-    // Circular card + dot modules; TL/TR/BL finder corners stay classic squares.
-    // Extra quiet zone so finders fit inside the circular clip (no data crop).
+    // White square · square finder corners · black dots only inside a center circle.
     window.__particlPaintCloud = function(text){
       var c = document.getElementById("cloud");
       var wrap = document.getElementById("canvasWrap");
@@ -106,14 +105,14 @@
         wrap.classList.remove("tx-cloud");
         wrap.classList.add("tx-paper");
         wrap.style.background = "#fff";
+        wrap.style.borderRadius = "";
       }
       if(!c || typeof qrcode !== "function") return false;
       var qr = qrcode(0, "Q");
       qr.addData(String(text || "PartiCl"), "Byte");
       qr.make();
       var n = qr.getModuleCount();
-      // Quiet must fit finder corners inside an inscribed circle: q >= n*(√2-1)/2
-      var quiet = Math.max(4, Math.ceil(n * 0.22));
+      var quiet = 4;
       var W = 1024;
       var cell = Math.max(8, Math.floor(W / (n + quiet * 2)));
       var size = cell * (n + quiet * 2);
@@ -125,32 +124,26 @@
       c.height = size;
       var ctx = c.getContext("2d");
       if(!ctx) return false;
+
+      // White square paper
       ctx.fillStyle = "#ffffff";
       ctx.fillRect(0, 0, size, size);
 
       var origin = quiet * cell;
-      var field = n * cell;
-      var cx = size * 0.5;
-      var cy = size * 0.5;
-      var bodyR = field * 0.5 + cell * 0.25;
+      var mid = (n - 1) / 2;
+      // Circle sits between the three finder eyes (leaves corners clear)
+      var diskR = mid - 3.2;
+      var diskR2 = diskR * diskR;
       var dotRad = cell * 0.48;
 
       function inPat(rr, cc){ return rr >= 0 && rr < 7 && cc >= 0 && cc < 7; }
       function isFinder(r, col){
         return inPat(r, col) || inPat(r, col - (n - 7)) || inPat(r - (n - 7), col);
       }
-
-      // Circular body wash
-      var bg = ctx.createRadialGradient(cx, cy, bodyR * 0.4, cx, cy, bodyR);
-      bg.addColorStop(0, "#ffffff");
-      bg.addColorStop(1, "#f2f2f2");
-      ctx.beginPath();
-      ctx.arc(cx, cy, bodyR, 0, Math.PI * 2);
-      ctx.fillStyle = bg;
-      ctx.fill();
-      ctx.strokeStyle = "rgba(0,0,0,0.1)";
-      ctx.lineWidth = Math.max(1, cell * 0.12);
-      ctx.stroke();
+      function inDotCircle(r, col){
+        var dr = r - mid, dc = col - mid;
+        return (dr * dr + dc * dc) <= diskR2;
+      }
 
       ctx.fillStyle = "#000000";
       for(var r = 0; r < n; r++){
@@ -158,21 +151,34 @@
           if(!qr.isDark(r, col)) continue;
           var x0 = origin + col * cell;
           var y0 = origin + r * cell;
+
           if(isFinder(r, col)){
+            // Corner finders — solid squares at the edges
             ctx.fillRect(x0, y0, cell, cell);
-          }else{
+            continue;
+          }
+
+          // Timing patterns help scanners; keep them even near the rim
+          if(r === 6 || col === 6){
             ctx.beginPath();
             ctx.arc(x0 + cell * 0.5, y0 + cell * 0.5, dotRad, 0, Math.PI * 2);
             ctx.fill();
+            continue;
           }
+
+          // Data modules only as a black-dot circle in the middle
+          if(!inDotCircle(r, col)) continue;
+          ctx.beginPath();
+          ctx.arc(x0 + cell * 0.5, y0 + cell * 0.5, dotRad, 0, Math.PI * 2);
+          ctx.fill();
         }
       }
       return true;
     };
     window.__particlPaintCloud("PartiCl QR ready - Encode a file");
     var st = document.getElementById("status");
-    if(st) st.textContent = "Boot circular dot-QR · loading module…";
+    if(st) st.textContent = "Boot square + dot circle · loading module…";
   </script>
-  <script type="module" src="app-qr.js?v=154680"></script>
+  <script type="module" src="app-qr.js?v=154690"></script>
 </body>
 </html>
