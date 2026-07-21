@@ -681,7 +681,7 @@ function encodeFile(file){
       frameIndex = 0
       phaseStartedAt = 0
       txRun++
-      modeButtons.style.display = "none"
+      modeButtons.classList.add("is-hidden")
       showQrUi()
       drawQrToCanvas(frames[0])
       if(txRaf) cancelAnimationFrame(txRaf)
@@ -699,8 +699,8 @@ function encodeFile(file){
       )
     }catch(err){
       console.error(err)
+      modeButtons.classList.remove("is-hidden")
       setStatus(`Encode failed: ${err.message || err}`)
-      modeButtons.style.display = ""
     }
   }
   reader.readAsArrayBuffer(file)
@@ -985,7 +985,7 @@ async function startDecoder(){
   txRun = 0
   frames = []
   if(txRaf) cancelAnimationFrame(txRaf)
-  modeButtons.style.display = "none"
+  modeButtons.classList.add("is-hidden")
   canvasWrap.style.display = "none"
   videoWrap.hidden = false
   progressWrap.hidden = false

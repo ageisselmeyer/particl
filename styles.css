@@ -45,6 +45,11 @@ h1{
   gap:12px;
   flex-wrap:wrap;
   margin:18px 0 8px;
+  min-height:48px; /* reserve space so QR doesn't jump when buttons hide */
+}
+#modeButtons.is-hidden{
+  visibility:hidden;
+  pointer-events:none;
 }
 
 button{
