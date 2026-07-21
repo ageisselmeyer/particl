@@ -44,8 +44,8 @@ function setStatus(msg){
 // --- Protocol ---
 const PARTICLE_COUNT = 22000
 const DATA_COUNT = 4096 // bits carried per frame (subset of particles)
-const FRAME_HOLD_MS = 520
-const FRAME_BLEND_MS = 220
+const FRAME_HOLD_MS = 900
+const FRAME_BLEND_MS = 0
 
 // Corner brackets on TX match these normalized positions (center of L-mark).
 const ALIGN_MARKER_UV = 0.075
@@ -437,20 +437,36 @@ function onResize(){
   bloomPass.resolution.set(w, h)
 }
 
-function setSignalBits(bitStr){
+function setSignalBits(bitStr, snap){
   // Decorative ambient first, then stamp data bits onto Sobol-scattered indices
   for(let i = 0; i < PARTICLE_COUNT; i++){
     if(IS_DATA[i]) continue
     const twinkle = 0.5 + 0.5 * Math.sin(hash01(i, 11) * 6.283 + performance.now() * 0.00045)
-    signalTarget[i] = 0.05 + 0.16 * twinkle
+    signalTarget[i] = txRun ? 0.02 : (0.05 + 0.16 * twinkle)
   }
   for(let b = 0; b < DATA_COUNT; b++){
     const pi = DATA_INDICES[b]
-    signalTarget[pi] = bitStr[b] === "1" ? 1 : 0.04
+    // High contrast for optical decode (avoid mid-gray bleed from bloom).
+    signalTarget[pi] = bitStr[b] === "1" ? 1 : 0.0
+  }
+  if(snap && signalAttr){
+    const arr = signalAttr.array
+    for(let i = 0; i < PARTICLE_COUNT; i++) arr[i] = signalTarget[i]
+    signalAttr.needsUpdate = true
   }
 }
 
 function lerpSignals(dt){
+  // During TX hold, keep bits hard — no soft blend that mixes frames optically.
+  if(txRun && frames.length && animPhase === "hold"){
+    const arr = signalAttr.array
+    let dirty = false
+    for(let i = 0; i < PARTICLE_COUNT; i++){
+      if(arr[i] !== signalTarget[i]){ arr[i] = signalTarget[i]; dirty = true }
+    }
+    if(dirty) signalAttr.needsUpdate = true
+    return
+  }
   const arr = signalAttr.array
   const k = 1 - Math.exp(-dt * 7)
   for(let i = 0; i < PARTICLE_COUNT; i++){
@@ -462,15 +478,31 @@ function lerpSignals(dt){
 function renderLoop(now){
   requestAnimationFrame(renderLoop)
   if(!cloudReady) return
+  const encoding = !!(frames.length && txRun)
   const t = now * 0.001
-  uniforms.uTime.value = t
-  uniforms.uSpin.value = t * 0.18
-  points.rotation.y = t * 0.12
-  points.rotation.x = Math.sin(t * 0.15) * 0.08
-
-  camera.position.x = CAMERA_BASE.x + Math.sin(t * 0.15) * 0.12
-  camera.position.y = CAMERA_BASE.y + Math.cos(t * 0.18) * 0.08
-  camera.position.z = CAMERA_BASE.z
+  // Freeze pose during encode so decoder's static projection can match.
+  if(encoding){
+    uniforms.uTime.value = 0
+    uniforms.uSpin.value = 0
+    points.rotation.set(0, 0, 0)
+    camera.position.set(CAMERA_BASE.x, CAMERA_BASE.y, CAMERA_BASE.z)
+    if(bloomPass){
+      bloomPass.strength = 0.55
+      bloomPass.threshold = 0.62
+    }
+  }else{
+    uniforms.uTime.value = t
+    uniforms.uSpin.value = t * 0.18
+    points.rotation.y = t * 0.12
+    points.rotation.x = Math.sin(t * 0.15) * 0.08
+    camera.position.x = CAMERA_BASE.x + Math.sin(t * 0.15) * 0.12
+    camera.position.y = CAMERA_BASE.y + Math.cos(t * 0.18) * 0.08
+    camera.position.z = CAMERA_BASE.z
+    if(bloomPass){
+      bloomPass.strength = 1.12
+      bloomPass.threshold = 0.52
+    }
+  }
   camera.lookAt(0, 0, 0)
 
   const dt = Math.min(0.05, (renderLoop._last ? (now - renderLoop._last) : 16) / 1000)
@@ -478,7 +510,7 @@ function renderLoop(now){
   lerpSignals(dt)
 
   // TX frame machine
-  if(frames.length && txRun){
+  if(encoding){
     tickTx(now)
   }
 
@@ -580,7 +612,7 @@ function encodeFile(file){
     modeButtons.style.display = "none"
     videoWrap.hidden = true
     canvasWrap.style.display = ""
-    setSignalBits(frames[0])
+    setSignalBits(frames[0], true)
     setStatus(
       `Streaming “${meta.name}” · ${frames.length} frames (${ft.k || "?"}×${ft.copies || 2} + ${ft.r || "?"} repair) · ~80% decode OK · point camera here`
     )
@@ -591,18 +623,22 @@ function encodeFile(file){
 function tickTx(now){
   if(!phaseStartedAt) phaseStartedAt = now
   let elapsed = now - phaseStartedAt
-  const dur = animPhase === "hold" ? FRAME_HOLD_MS : FRAME_BLEND_MS
+  const dur = animPhase === "hold" ? FRAME_HOLD_MS : Math.max(1, FRAME_BLEND_MS)
   while(elapsed >= dur){
     elapsed -= dur
     phaseStartedAt += dur
-    if(animPhase === "hold"){
+    if(FRAME_BLEND_MS <= 0){
+      frameIndex = (frameIndex + 1) % frames.length
+      animPhase = "hold"
+      setSignalBits(frames[frameIndex], true)
+    }else if(animPhase === "hold"){
       animPhase = "blend"
       const next = frames[(frameIndex + 1) % frames.length]
-      setSignalBits(next)
+      setSignalBits(next, false)
     }else{
       frameIndex = (frameIndex + 1) % frames.length
       animPhase = "hold"
-      setSignalBits(frames[frameIndex])
+      setSignalBits(frames[frameIndex], true)
     }
   }
   if((tickTx._lastStatus | 0) !== frameIndex){
@@ -630,8 +666,8 @@ let decodeBitAccum = null
 let decodeBitFrames = 0
 let decodeAlignLocked = false
 let decodeAlignMiss = 0
-const DECODE_ACCUM_MIN = 6
-const DECODE_ACCUM_MAX = 14
+const DECODE_ACCUM_MIN = 4
+const DECODE_ACCUM_MAX = 8
 let decodeFrameNo = 0
 let lastGoodQuad = null
 let lastGoodQuadAge = 0
@@ -801,22 +837,56 @@ function sampleLumaAt(data, W, H, x, y){
 
 function bitsFromAccum(accum, frames){
   if(!accum || frames < 1) return null
+  const vals = new Float32Array(DATA_COUNT)
   let sum = 0
-  for(let i = 0; i < DATA_COUNT; i++) sum += accum[i] / frames
+  for(let i = 0; i < DATA_COUNT; i++){
+    vals[i] = accum[i] / frames
+    sum += vals[i]
+  }
   const mean = sum / DATA_COUNT
   let varSum = 0
   for(let i = 0; i < DATA_COUNT; i++){
-    const v = accum[i] / frames
-    const d = v - mean
+    const d = vals[i] - mean
     varSum += d * d
   }
   const std = Math.sqrt(varSum / DATA_COUNT)
   decodeDbg.mean = mean
   decodeDbg.std = std
   decodeDbg.accum = frames
-  const thr = mean + std * 0.12
+
+  // Otsu-ish threshold on a coarse histogram — better than mean+k*std for glossy glare.
+  const bins = new Int32Array(32)
+  let vmin = Infinity, vmax = -Infinity
+  for(let i = 0; i < DATA_COUNT; i++){
+    if(vals[i] < vmin) vmin = vals[i]
+    if(vals[i] > vmax) vmax = vals[i]
+  }
+  const span = Math.max(1e-3, vmax - vmin)
+  for(let i = 0; i < DATA_COUNT; i++){
+    const b = Math.min(31, ((vals[i] - vmin) / span * 31) | 0)
+    bins[b]++
+  }
+  let w0 = 0, sum0 = 0
+  let best = -1, bestVar = -1
+  const total = DATA_COUNT
+  const sumAll = ((mean - vmin) / span) * 31 * total // approx; recompute exactly:
+  let sumBins = 0
+  for(let b = 0; b < 32; b++) sumBins += b * bins[b]
+  for(let t = 0; t < 31; t++){
+    w0 += bins[t]
+    if(!w0) continue
+    sum0 += t * bins[t]
+    const w1 = total - w0
+    if(!w1) break
+    const m0 = sum0 / w0
+    const m1 = (sumBins - sum0) / w1
+    const between = w0 * w1 * (m0 - m1) * (m0 - m1)
+    if(between > bestVar){ bestVar = between; best = t }
+  }
+  const thrBin = best >= 0 ? best + 0.5 : 15.5
+  const thr = vmin + (thrBin / 31) * span
   let bits = ""
-  for(let i = 0; i < DATA_COUNT; i++) bits += (accum[i] / frames) > thr ? "1" : "0"
+  for(let i = 0; i < DATA_COUNT; i++) bits += vals[i] > thr ? "1" : "0"
   return bits
 }
 
@@ -904,16 +974,25 @@ function sampleCloudBitsFromVideo(){
 
   const inset = SAMPLE_INSET
   const vals = new Float32Array(DATA_COUNT)
+  // Match frozen TX camera (FOV 38°, pos CAMERA_BASE) + mean shell radius ~0.90.
+  const fov = 38 * Math.PI / 180
+  const f = 1 / Math.tan(fov * 0.5)
+  const camY = CAMERA_BASE.y
+  const camZ = CAMERA_BASE.z
+  const shellR = 0.90
   for(let b = 0; b < DATA_COUNT; b++){
     const i = DATA_INDICES[b]
-    const x = particleDirs[i * 3]
-    const y = particleDirs[i * 3 + 1]
-    const z = particleDirs[i * 3 + 2]
-    const depth = z + 1.4
-    const px = (x / depth) * 0.88
-    const py = (y / depth) * 0.88
-    let u = px * 0.5 + 0.5
-    let v = -py * 0.5 + 0.5
+    const x = particleDirs[i * 3] * shellR
+    const y = particleDirs[i * 3 + 1] * shellR
+    const z = particleDirs[i * 3 + 2] * shellR
+    const ex = x
+    const ey = y - camY
+    const ez = z - camZ // ~ -4.15
+    const invZ = 1 / Math.max(0.35, -ez)
+    const ndcX = f * ex * invZ
+    const ndcY = f * ey * invZ
+    let u = ndcX * 0.5 + 0.5
+    let v = -ndcY * 0.5 + 0.5
     u = inset + u * (1 - inset * 2)
     v = inset + v * (1 - inset * 2)
     const p = bilinearInQuad(u, v, useQuad.tl, useQuad.tr, useQuad.br, useQuad.bl)
@@ -1202,51 +1281,55 @@ function tryFinish(){
 
 function bitsToPayload(bits){
   if(!bits || bits.length < SYNC.length + 16) return null
-  let start = -1
+  const candidates = []
   let bestOk = 0
-  for(let i = 0; i <= bits.length - SYNC.length; i++){
+  // Prefer starts near 0 — real frames always begin with SYNC.
+  const limit = bits.length - SYNC.length
+  for(let i = 0; i <= limit; i++){
     let ok = 0
     for(let j = 0; j < SYNC.length; j++) if(bits[i + j] === SYNC[j]) ok++
     if(ok > bestOk) bestOk = ok
-    if(ok >= 24){ start = i; break }
+    if(ok >= 26 || (i <= 8 && ok >= 22)) candidates.push({ i, ok })
   }
   decodeDbg.sync = bestOk
-  if(start < 0){
+  if(!candidates.length){
     decodeDbg.crc = "no-sync"
     decodeDbg.last = `no SYNC (best ${bestOk}/32)`
     return null
   }
-  const bodyBits = bits.slice(start + SYNC.length)
-  const maxBytes = Math.min(520, (bodyBits.length / 8) | 0)
-  // Frame bits are zero-padded to DATA_COUNT; scan body lengths until CRC matches.
-  let tried = 0
-  for(let blen = 8; blen <= maxBytes; blen++){
-    const body = bitsToBytes(bodyBits.slice(0, blen * 8))
-    if(body.length < 5) continue
-    tried++
-    const raw = body.subarray(0, body.length - 4)
-    const crc =
-      ((body[body.length - 4] << 24) |
-        (body[body.length - 3] << 16) |
-        (body[body.length - 2] << 8) |
-        body[body.length - 1]) >>> 0
-    if(crc32(raw) !== crc) continue
-    try{
-      const text = new TextDecoder().decode(raw)
-      if(text.startsWith("PC6M|") || text.startsWith("PC6|")){
-        decodeDbg.crc = "ok"
-        decodeDbg.last = `payload ${text.slice(0, 28)}…`
-        return text
-      }
-      if(text.startsWith("PC5M|") || text.startsWith("PC5D|")){
-        decodeDbg.crc = "ok"
-        decodeDbg.last = `payload ${text.slice(0, 28)}…`
-        return text
-      }
-    }catch(_){}
+  candidates.sort((a, b) => b.ok - a.ok || a.i - b.i)
+  const seen = new Set()
+  let triedLens = 0
+  for(const cand of candidates){
+    if(seen.has(cand.i)) continue
+    seen.add(cand.i)
+    if(seen.size > 12) break
+    const bodyBits = bits.slice(cand.i + SYNC.length)
+    const maxBytes = Math.min(520, (bodyBits.length / 8) | 0)
+    for(let blen = 8; blen <= maxBytes; blen++){
+      const body = bitsToBytes(bodyBits.slice(0, blen * 8))
+      if(body.length < 5) continue
+      triedLens++
+      const raw = body.subarray(0, body.length - 4)
+      const crc =
+        ((body[body.length - 4] << 24) |
+          (body[body.length - 3] << 16) |
+          (body[body.length - 2] << 8) |
+          body[body.length - 1]) >>> 0
+      if(crc32(raw) !== crc) continue
+      try{
+        const text = new TextDecoder().decode(raw)
+        if(text.startsWith("PC6M|") || text.startsWith("PC6|") ||
+           text.startsWith("PC5M|") || text.startsWith("PC5D|")){
+          decodeDbg.crc = "ok"
+          decodeDbg.last = `SYNC@${cand.i}(${cand.ok}/32) ${text.slice(0, 24)}…`
+          return text
+        }
+      }catch(_){}
+    }
   }
   decodeDbg.crc = "fail"
-  decodeDbg.last = `SYNC@${start} but CRC miss (${tried} lens)`
+  decodeDbg.last = `best SYNC ${bestOk}/32 @${candidates[0].i} · CRC miss (${triedLens} lens)`
   return null
 }
 
