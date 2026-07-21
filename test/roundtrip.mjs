@@ -5,7 +5,7 @@
  */
 import {
   DATA_COUNT, SYNC, SYMBOL_SIZE,
-  expandBits, collapseVals, thresholdVals,
+  expandBits, packFrame, collapseVals, thresholdVals,
   wrapPayload, valsToPayload, bitsToInkVals
 } from "../protocol.js"
 
@@ -45,10 +45,17 @@ function roundtrip(label, text){
   const logical = wrapPayload(text)
   assert(logical.startsWith(SYNC), `${label}: missing SYNC`)
   assert(logical.length <= DATA_COUNT, `${label}: packet too long (${logical.length})`)
-  const frame = expandBits(logical, DATA_COUNT)
+  const frame = packFrame(logical)
+  assert(frame.length === DATA_COUNT, `${label}: frame ${frame.length}`)
   const vals = bitsToInkVals(frame)
-  const direct = thresholdVals(collapseVals(vals, logical.length))
-  assert(direct.sync === 32, `${label}: direct SYNC ${direct.sync}/32`)
+  const direct = thresholdVals(collapseVals(vals.subarray(SYNC.length), logical.length - SYNC.length))
+  // SYNC is row 0 — score directly
+  let syncOk = 0
+  for(let i = 0; i < SYNC.length; i++){
+    const bit = vals[i] > 100 ? "1" : "0"
+    if(bit === SYNC[i]) syncOk++
+  }
+  assert(syncOk === 32, `${label}: direct SYNC ${syncOk}/32`)
   const recovered = valsToPayload(vals)
   assert(recovered.text === text, `${label}: CRC fail (sync=${recovered.sync})`)
   return { sync: recovered.sync, logicalLen: logical.length }
@@ -58,7 +65,7 @@ function tryNoisy(meta, noise, frames, seed){
   const rnd = mulberry32(seed)
   const text = makePc6(meta)
   const logical = wrapPayload(text)
-  const frame = expandBits(logical, DATA_COUNT)
+  const frame = packFrame(logical)
   const accum = new Float32Array(DATA_COUNT)
   for(let f = 0; f < frames; f++){
     const vals = bitsToInkVals(frame)
@@ -107,8 +114,9 @@ console.log("\n3) RS corrects flipped cells:")
 runCase("PC6 + 8 flipped bits", () => {
   const text = makePc6(false)
   const logical = wrapPayload(text)
-  const frame = expandBits(logical, DATA_COUNT)
+  const frame = packFrame(logical)
   const vals = bitsToInkVals(frame)
+  // Flip data-region cells only (leave SYNC row intact)
   for(const i of [40, 100, 200, 350, 500, 650, 800, 950]){
     vals[i] = vals[i] > 100 ? 20 : 200
   }

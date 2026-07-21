@@ -50,14 +50,15 @@ const BIT_REPS = 1
 const GRID_W = 32
 const GRID_H = 32
 const DATA_COUNT = GRID_W * GRID_H // 1024 bits/frame — fills the full align square
+const SYNC = "11001100111100001010101011001100" // 32-bit
+const SYNC_CELLS = SYNC.length // row 0 — fixed finder-like region
+const DATA_CELLS = DATA_COUNT - SYNC_CELLS // rows 1–31 for RS payload
 const PHYS_COUNT = DATA_COUNT * BIT_REPS
 const ALIGN_MARKER_UV = 0.04
 const SAMPLE_INSET = 0.06
 const FRAME_HOLD_MS = 1800
 const FRAME_BLEND_MS = 0
 const SYMBOL_SIZE = 16
-
-const SYNC = "11001100111100001010101011001100" // 32-bit
 
 // Fountain (LT-style): k source symbols + repair → recover from ~80% of sent frames.
 const FOUNTAIN_SOURCE_COPIES = 2
@@ -253,7 +254,7 @@ function bitsToBytes(bits){
   return out
 }
 
-// Even stretch so SYNC, CRC, payload, and RS parity share equal redundancy.
+// Even stretch for the data region only.
 function expandBits(payload, n){
   const L = payload.length
   if(L <= 0) return "0".repeat(n)
@@ -261,6 +262,13 @@ function expandBits(payload, n){
   let out = ""
   for(let i = 0; i < n; i++) out += payload[((i * L) / n) | 0]
   return out
+}
+
+/** SYNC locked to row 0; RS body even-stretched across rows 1–31. */
+function packFrame(logical){
+  if(!logical.startsWith(SYNC)) return expandBits(logical, DATA_COUNT)
+  const body = logical.slice(SYNC.length)
+  return SYNC + expandBits(body, DATA_CELLS)
 }
 
 function collapseVals(vals, targetLen){
@@ -282,27 +290,42 @@ function collapseVals(vals, targetLen){
   return out
 }
 
-/** Subtract local mean on the 32×32 grid — QR-style adaptive contrast. */
-function localNormalize(vals, winHalf = 2){
-  if(vals.length !== DATA_COUNT) return vals
-  const out = new Float32Array(DATA_COUNT)
-  for(let gy = 0; gy < GRID_H; gy++){
+function thresholdSyncRow(vals){
+  const n = Math.min(SYNC_CELLS, vals.length)
+  let sum = 0
+  for(let i = 0; i < n; i++) sum += vals[i]
+  const mean = sum / n
+  let bits = ""
+  let varSum = 0
+  for(let i = 0; i < n; i++){
+    bits += vals[i] > mean ? "1" : "0"
+    const d = vals[i] - mean
+    varSum += d * d
+  }
+  return { bits, mean, std: Math.sqrt(varSum / n), sync: syncScoreAt(bits, 0) }
+}
+
+/** Local mean on data rows only — don't smear SYNC into payload. */
+function localNormalizeData(vals, winHalf = 2){
+  if(vals.length !== DATA_COUNT) return vals.subarray(Math.min(SYNC_CELLS, vals.length))
+  const out = new Float32Array(DATA_CELLS)
+  for(let gy = 1; gy < GRID_H; gy++){
     for(let gx = 0; gx < GRID_W; gx++){
       let sum = 0, n = 0
       for(let dy = -winHalf; dy <= winHalf; dy++){
         for(let dx = -winHalf; dx <= winHalf; dx++){
           const x = gx + dx, y = gy + dy
-          if(x < 0 || y < 0 || x >= GRID_W || y >= GRID_H) continue
+          if(x < 0 || y < 1 || x >= GRID_W || y >= GRID_H) continue
           sum += vals[y * GRID_W + x]
           n++
         }
       }
-      out[gy * GRID_W + gx] = vals[gy * GRID_W + gx] - sum / n
+      out[(gy - 1) * GRID_W + gx] = vals[gy * GRID_W + gx] - sum / n
     }
   }
   let min = Infinity
-  for(let i = 0; i < DATA_COUNT; i++) if(out[i] < min) min = out[i]
-  for(let i = 0; i < DATA_COUNT; i++) out[i] -= min
+  for(let i = 0; i < DATA_CELLS; i++) if(out[i] < min) min = out[i]
+  for(let i = 0; i < DATA_CELLS; i++) out[i] -= min
   return out
 }
 
@@ -737,7 +760,7 @@ function buildFrames(fileBytes, fileMeta){
       console.warn(`Packet ${pi} needs ${payloadBits.length} bits but frame holds ${DATA_COUNT}; truncating`)
       out.push(payloadBits.slice(0, DATA_COUNT))
     }else{
-      out.push(expandBits(payloadBits, DATA_COUNT))
+      out.push(packFrame(payloadBits))
     }
   }
   out._fountain = { k, r, copies: FOUNTAIN_SOURCE_COPIES, total: packets.length }
@@ -1061,11 +1084,12 @@ function bitsFromAccum(accum, frames){
   return bitsFromVals(vals)
 }
 
-// Frames are stretch-filled across the grid — collapse to each candidate RS codeword length.
+// Fixed SYNC row + RS body in data region.
 function valsToPayload(vals){
-  if(!vals || vals.length < SYNC.length + 40) return null
-  const normalized = localNormalize(vals)
-  const maxCw = Math.min(160, ((normalized.length - SYNC.length) / 8) | 0)
+  if(!vals || vals.length < SYNC_CELLS + 40) return null
+  const syncRow = thresholdSyncRow(vals)
+  const dataVals = localNormalizeData(vals)
+  const maxCw = Math.min(120, (DATA_CELLS / 8) | 0)
   const cws = []
   for(let cw = RS_NSYM + 5; cw <= maxCw; cw++) cws.push(cw)
   cws.sort((a, b) => {
@@ -1074,66 +1098,63 @@ function valsToPayload(vals){
     return da - db || a - b
   })
 
-  let bestOk = 0
   let triedLens = 0
-  let bestBits = null
-  let bestConf = null
+  let bestCand = null
+  decodeDbg.sync = syncRow.sync
+  decodeDbg.mean = syncRow.mean
+  decodeDbg.std = syncRow.std
 
   for(const cwLen of cws){
-    const L = SYNC.length + cwLen * 8
-    const cvals = collapseVals(normalized, L)
+    const cvals = collapseVals(dataVals, cwLen * 8)
     const r = thresholdVals(cvals)
-    if(r.sync > bestOk){
-      bestOk = r.sync
-      bestBits = r.bits
-      bestConf = r.conf
-      decodeDbg.mean = r.mean
-      decodeDbg.std = r.std
-    }
-    if(r.sync < 26) continue
+    if(syncRow.sync < 26) continue
     triedLens++
-    const hit = decodeBodyText(r.bits.slice(SYNC.length), `rs@${L}(${r.sync}/32)`)
+    const hit = decodeBodyText(r.bits, `row0+rs@${cwLen}(${syncRow.sync}/32)`)
     if(hit.text){
-      decodeDbg.sync = r.sync
       decodeDbg.crc = "ok"
       decodeDbg.last = `${hit.startLabel} ${hit.text.slice(0, 24)}…`
       bitsFromVals._conf = r.conf
       bitsFromVals._vals = cvals
       return hit.text
     }
+    if(!bestCand || cwLen === 75 || cwLen === 110){
+      bestCand = { bits: r.bits, conf: r.conf, cwLen, std: r.std, mean: r.mean }
+    }
   }
 
-  decodeDbg.sync = bestOk
-  if(bestOk < 20){
+  if(syncRow.sync < 20){
     decodeDbg.crc = "no-sync"
-    decodeDbg.last = `no SYNC (best ${bestOk}/32)`
+    decodeDbg.last = `no SYNC (best ${syncRow.sync}/32)`
     return null
   }
 
-  if(bestBits && bestConf && bestOk >= 24){
-    const amb = []
-    for(let i = SYNC.length; i < bestBits.length; i++) amb.push({ i, c: bestConf[i] ?? 1e9 })
-    amb.sort((a, b) => a.c - b.c)
-    const top = amb.slice(0, 16).map(x => x.i)
-    const flipAt = (src, idx) => {
-      const arr = src.split("")
-      arr[idx] = arr[idx] === "1" ? "0" : "1"
-      return arr.join("")
-    }
-    for(const idx of top){
-      const hit = decodeBodyText(flipAt(bestBits, idx).slice(SYNC.length), `flip1@${idx}`)
-      triedLens += hit.tried
-      if(hit.text){
-        decodeDbg.crc = "ok"
-        decodeDbg.last = `${hit.startLabel} ${hit.text.slice(0, 24)}…`
-        return hit.text
+  if(bestCand){
+    decodeDbg.mean = bestCand.mean
+    decodeDbg.std = bestCand.std
+  }
+
+  const tryLens = []
+  if(bestCand) tryLens.push(bestCand.cwLen)
+  for(const cwLen of [75, 110]){
+    if(cwLen >= RS_NSYM + 5 && cwLen <= maxCw && !tryLens.includes(cwLen)) tryLens.push(cwLen)
+  }
+
+  if(syncRow.sync >= 24){
+    for(const cwLen of tryLens){
+      const cvals = collapseVals(dataVals, cwLen * 8)
+      const r = thresholdVals(cvals)
+      if(!r.conf) continue
+      const amb = []
+      for(let i = 0; i < r.bits.length; i++) amb.push({ i, c: r.conf[i] ?? 1e9 })
+      amb.sort((a, b) => a.c - b.c)
+      const top = amb.slice(0, 16).map(x => x.i)
+      const flipAt = (src, idx) => {
+        const arr = src.split("")
+        arr[idx] = arr[idx] === "1" ? "0" : "1"
+        return arr.join("")
       }
-    }
-    for(let a = 0; a < Math.min(8, top.length); a++){
-      for(let b = a + 1; b < Math.min(8, top.length); b++){
-        let s = flipAt(bestBits, top[a])
-        s = flipAt(s, top[b])
-        const hit = decodeBodyText(s.slice(SYNC.length), `flip2`)
+      for(const idx of top){
+        const hit = decodeBodyText(flipAt(r.bits, idx), `flip1@${idx}`)
         triedLens += hit.tried
         if(hit.text){
           decodeDbg.crc = "ok"
@@ -1141,11 +1162,24 @@ function valsToPayload(vals){
           return hit.text
         }
       }
+      for(let a = 0; a < Math.min(8, top.length); a++){
+        for(let b = a + 1; b < Math.min(8, top.length); b++){
+          let s = flipAt(r.bits, top[a])
+          s = flipAt(s, top[b])
+          const hit = decodeBodyText(s, `flip2`)
+          triedLens += hit.tried
+          if(hit.text){
+            decodeDbg.crc = "ok"
+            decodeDbg.last = `${hit.startLabel} ${hit.text.slice(0, 24)}…`
+            return hit.text
+          }
+        }
+      }
     }
   }
 
   decodeDbg.crc = "fail"
-  decodeDbg.last = `best SYNC ${bestOk}/32 · CRC miss (${triedLens} lens)`
+  decodeDbg.last = `best SYNC ${syncRow.sync}/32 · CRC miss (${triedLens} lens)`
   return null
 }
 
@@ -1247,24 +1281,13 @@ function sampleCloudBitsFromVideo(){
   }
 
   const bestVals = sampleVals()
-  // Raw stretched frame SYNC is meaningless (~16). Probe collapsed lengths for the meter.
-  let probeSync = 0
-  let probeStd = 0
-  let probeMean = 0
-  for(const bb of [47, 82, 60, 100]){
-    const L = SYNC.length + bb * 8
-    if(L > bestVals.length) continue
-    const r = thresholdVals(collapseVals(bestVals, L))
-    if(r.sync > probeSync){
-      probeSync = r.sync
-      probeStd = r.std
-      probeMean = r.mean
-    }
-  }
-  decodeDbg.sync = probeSync
-  decodeDbg.mean = probeMean
-  decodeDbg.std = probeStd
-  decodeDbg.last = `probe SYNC ${probeSync}/32 · std ${probeStd.toFixed(1)}`
+  // SYNC is row 0 — score it directly (QR-style fixed region).
+  const syncRow = thresholdSyncRow(bestVals)
+  const dataProbe = thresholdVals(collapseVals(localNormalizeData(bestVals), 75 * 8))
+  decodeDbg.sync = syncRow.sync
+  decodeDbg.mean = dataProbe.mean
+  decodeDbg.std = dataProbe.std
+  decodeDbg.last = `row0 SYNC ${syncRow.sync}/32 · data std ${dataProbe.std.toFixed(1)}`
 
   if(!decodeBitAccum) decodeBitAccum = new Float32Array(DATA_COUNT)
   for(let i = 0; i < DATA_COUNT; i++) decodeBitAccum[i] += bestVals[i]
@@ -1604,11 +1627,9 @@ function decodeBodyText(bodyBits, startLabel){
     return tryText(raw, label)
   }
 
-  // RS codeword: [crc|raw] + RS_NSYM parity — corrects up to 12 bad bytes.
-  for(let cwLen = RS_NSYM + 5; cwLen <= maxBytes; cwLen++){
-    const cw = bitsToBytes(bodyBits.slice(0, cwLen * 8))
-    if(cw.length !== cwLen) continue
-    const data = rsDecode(cw, RS_NSYM)
+  // Exact-length RS first (bodyBits already collapsed to one codeword size).
+  if(maxBytes >= RS_NSYM + 5){
+    const data = rsDecode(bitsToBytes(bodyBits.slice(0, maxBytes * 8)), RS_NSYM)
     const hit = tryCrcPrefixed(data, startLabel + "/rs")
     if(hit) return hit
   }

@@ -7,6 +7,8 @@ export const SYNC = "11001100111100001010101011001100"
 export const GRID_W = 32
 export const GRID_H = 32
 export const DATA_COUNT = GRID_W * GRID_H
+export const SYNC_CELLS = SYNC.length // row 0 — fixed, never stretched with payload
+export const DATA_CELLS = DATA_COUNT - SYNC_CELLS // rows 1–31
 export const SYMBOL_SIZE = 16
 
 export function bytesToBits(bytes){
@@ -31,10 +33,7 @@ export function crc32(bytes){
   return (c ^ 0xffffffff) >>> 0
 }
 
-/**
- * Even stretch across the frame so SYNC, CRC, payload, and RS parity share
- * equal redundancy (front-loaded stretch starved parity at the end).
- */
+/** Even stretch for the data region only (not SYNC). */
 export function expandBits(payload, n){
   const L = payload.length
   if(L <= 0) return "0".repeat(n)
@@ -63,6 +62,21 @@ export function collapseVals(vals, targetLen){
   return out
 }
 
+/**
+ * QR-style layout: SYNC locked to row 0 (1 cell = 1 bit).
+ * RS codeword even-stretched across the remaining 992 cells.
+ */
+export function packFrame(logical){
+  if(!logical.startsWith(SYNC)){
+    return expandBits(logical, DATA_COUNT)
+  }
+  const body = logical.slice(SYNC.length)
+  if(SYNC.length + body.length > DATA_COUNT && body.length > DATA_CELLS){
+    return (SYNC + body).slice(0, DATA_COUNT)
+  }
+  return SYNC + expandBits(body, DATA_CELLS)
+}
+
 export function syncScoreAt(bits, start = 0){
   if(!bits || start < 0 || start + SYNC.length > bits.length) return 0
   let ok = 0
@@ -70,28 +84,44 @@ export function syncScoreAt(bits, start = 0){
   return ok
 }
 
-/** Subtract local mean on the 32×32 grid — QR-style adaptive contrast. */
-export function localNormalize(vals, winHalf = 2){
-  if(vals.length !== DATA_COUNT) return vals
-  const out = new Float32Array(DATA_COUNT)
-  for(let gy = 0; gy < GRID_H; gy++){
+/** Threshold a short row (SYNC) with its own mean — glare-resistant. */
+export function thresholdSyncRow(vals){
+  const n = Math.min(SYNC_CELLS, vals.length)
+  let sum = 0
+  for(let i = 0; i < n; i++) sum += vals[i]
+  const mean = sum / n
+  let bits = ""
+  let varSum = 0
+  for(let i = 0; i < n; i++){
+    bits += vals[i] > mean ? "1" : "0"
+    const d = vals[i] - mean
+    varSum += d * d
+  }
+  return { bits, mean, std: Math.sqrt(varSum / n), sync: syncScoreAt(bits, 0) }
+}
+
+/** Local mean on data rows only — don't smear SYNC into payload. */
+export function localNormalizeData(vals, winHalf = 2){
+  if(vals.length !== DATA_COUNT) return vals.subarray(SYNC_CELLS)
+  const out = new Float32Array(DATA_CELLS)
+  for(let gy = 1; gy < GRID_H; gy++){
     for(let gx = 0; gx < GRID_W; gx++){
       let sum = 0, n = 0
       for(let dy = -winHalf; dy <= winHalf; dy++){
         for(let dx = -winHalf; dx <= winHalf; dx++){
           const x = gx + dx, y = gy + dy
-          if(x < 0 || y < 0 || x >= GRID_W || y >= GRID_H) continue
+          if(x < 0 || y < 1 || x >= GRID_W || y >= GRID_H) continue
           sum += vals[y * GRID_W + x]
           n++
         }
       }
-      out[gy * GRID_W + gx] = vals[gy * GRID_W + gx] - sum / n
+      const i = (gy - 1) * GRID_W + gx
+      out[i] = vals[gy * GRID_W + gx] - sum / n
     }
   }
-  // Shift to positive ink-like range for Otsu
   let min = Infinity
-  for(let i = 0; i < DATA_COUNT; i++) if(out[i] < min) min = out[i]
-  for(let i = 0; i < DATA_COUNT; i++) out[i] -= min
+  for(let i = 0; i < DATA_CELLS; i++) if(out[i] < min) min = out[i]
+  for(let i = 0; i < DATA_CELLS; i++) out[i] -= min
   return out
 }
 
@@ -163,21 +193,20 @@ export function wrapPayload(text){
   return SYNC + bytesToBits(cw)
 }
 
-/** Decode body bits: RS codeword first, then legacy plain CRC body. */
+/**
+ * Decode body bits at their exact length first (no 6000-length hunt).
+ * Body is an RS codeword: [crc|raw] + RS_NSYM parity.
+ */
 export function decodeBodyText(bodyBits){
-  const maxBytes = Math.min(520, (bodyBits.length / 8) | 0)
-  if(maxBytes < 5) return null
-
-  // RS path: codeword = [crc|raw] + RS_NSYM parity
-  for(let cwLen = RS_NSYM + 5; cwLen <= maxBytes; cwLen++){
-    const cw = bitsToBytes(bodyBits.slice(0, cwLen * 8))
-    if(cw.length !== cwLen) continue
-    const data = rsDecode(cw, RS_NSYM)
+  const cwLen = (bodyBits.length / 8) | 0
+  if(cwLen >= RS_NSYM + 5){
+    const data = rsDecode(bitsToBytes(bodyBits.slice(0, cwLen * 8)), RS_NSYM)
     const text = tryDecodeCrcBody(data)
     if(text) return text
   }
 
-  // Legacy (no RS): [crc32:4][raw…]
+  // Legacy plain CRC body (pre-RS frames)
+  const maxBytes = Math.min(520, cwLen)
   for(let rawLen = 4; rawLen <= maxBytes - 4; rawLen++){
     const body = bitsToBytes(bodyBits.slice(0, (rawLen + 4) * 8))
     const text = tryDecodeCrcBody(body)
@@ -223,39 +252,46 @@ export function deblurBitGrid(vals, k = 0.22){
 
 /** Recover payload from full-grid ink samples (higher = darker = bit 1). */
 export function valsToPayload(vals){
-  const normalized = localNormalize(vals)
-  const maxCw = Math.min(160, ((normalized.length - SYNC.length) / 8) | 0)
+  if(!vals || vals.length < DATA_COUNT){
+    // Fallback for odd lengths in tests
+  }
+  const syncRow = thresholdSyncRow(vals)
+  const dataVals = localNormalizeData(vals.length >= DATA_COUNT ? vals : padToGrid(vals))
+  const maxCw = Math.min(120, (DATA_CELLS / 8) | 0)
   const cws = []
   for(let cw = RS_NSYM + 5; cw <= maxCw; cw++) cws.push(cw)
-  // Prefer typical PC6 (~75) and PC6M (~110) codeword sizes
   cws.sort((a, b) => {
     const da = Math.min(Math.abs(a - 75), Math.abs(a - 110))
     const db = Math.min(Math.abs(b - 75), Math.abs(b - 110))
     return da - db || a - b
   })
 
-  let bestSync = 0
-  let bestBits = null
-  let bestConf = null
+  let bestSync = syncRow.sync
+  let bestCand = null
 
   for(const cwLen of cws){
-    const L = SYNC.length + cwLen * 8
-    const cvals = collapseVals(normalized, L)
+    const cvals = collapseVals(dataVals, cwLen * 8)
     const r = thresholdVals(cvals)
-    if(r.sync > bestSync){
-      bestSync = r.sync
-      bestBits = r.bits
-      bestConf = r.conf
+    if(syncRow.sync < 26) continue
+    const text = decodeBodyText(r.bits)
+    if(text) return { text, sync: syncRow.sync, length: SYNC_CELLS + cwLen * 8 }
+    if(!bestCand || cwLen === 75 || cwLen === 110){
+      bestCand = { bits: r.bits, conf: r.conf, cwLen }
     }
-    if(r.sync < 26) continue
-    const text = decodeBodyText(r.bits.slice(SYNC.length))
-    if(text) return { text, sync: r.sync, length: L }
   }
 
-  // Soft chase: flip ambiguous body bits, then RS+CRC
-  if(bestBits && bestConf && bestSync >= 28){
+  // Soft chase on best / expected lengths
+  const tryLens = []
+  if(bestCand) tryLens.push(bestCand.cwLen)
+  for(const cwLen of [75, 110]){
+    if(cwLen >= RS_NSYM + 5 && cwLen <= maxCw && !tryLens.includes(cwLen)) tryLens.push(cwLen)
+  }
+  for(const cwLen of tryLens){
+    const cvals = collapseVals(dataVals, cwLen * 8)
+    const r = thresholdVals(cvals)
+    if(syncRow.sync < 26 || !r.conf) continue
     const amb = []
-    for(let i = SYNC.length; i < bestBits.length; i++) amb.push({ i, c: bestConf[i] })
+    for(let i = 0; i < r.bits.length; i++) amb.push({ i, c: r.conf[i] })
     amb.sort((a, b) => a.c - b.c)
     const top = amb.slice(0, 16).map(x => x.i)
     const flipAt = (src, idx) => {
@@ -264,20 +300,26 @@ export function valsToPayload(vals){
       return arr.join("")
     }
     for(const idx of top){
-      const text = decodeBodyText(flipAt(bestBits, idx).slice(SYNC.length))
-      if(text) return { text, sync: bestSync, length: bestBits.length }
+      const text = decodeBodyText(flipAt(r.bits, idx))
+      if(text) return { text, sync: syncRow.sync, length: SYNC_CELLS + cwLen * 8 }
     }
     for(let a = 0; a < Math.min(8, top.length); a++){
       for(let b = a + 1; b < Math.min(8, top.length); b++){
-        let s = flipAt(bestBits, top[a])
+        let s = flipAt(r.bits, top[a])
         s = flipAt(s, top[b])
-        const text = decodeBodyText(s.slice(SYNC.length))
-        if(text) return { text, sync: bestSync, length: bestBits.length }
+        const text = decodeBodyText(s)
+        if(text) return { text, sync: syncRow.sync, length: SYNC_CELLS + cwLen * 8 }
       }
     }
   }
 
   return { text: null, sync: bestSync, length: 0 }
+}
+
+function padToGrid(vals){
+  const out = new Float32Array(DATA_COUNT)
+  out.set(vals.subarray(0, Math.min(vals.length, DATA_COUNT)))
+  return out
 }
 
 export function bitsToInkVals(bits, on = 200, off = 20){
