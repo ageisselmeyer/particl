@@ -156,6 +156,23 @@ button:active{ transform:translateY(0); }
   color:var(--muted);
 }
 
+#decodeDebug{
+  width:min(92vw, 520px);
+  margin:12px auto 0;
+  padding:10px 12px;
+  text-align:left;
+  font:11px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color:#9be7ff;
+  background:rgba(0, 20, 40, 0.72);
+  border:1px solid rgba(90,200,250,0.28);
+  border-radius:12px;
+  white-space:pre-wrap;
+  word-break:break-word;
+  max-height:40vh;
+  overflow:auto;
+}
+#decodeDebug[hidden]{ display:none !important; }
+
 #status{
   margin:14px auto 0;
   max-width:36rem;

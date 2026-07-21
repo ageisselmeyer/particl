@@ -16,6 +16,7 @@ const progressWrap = document.getElementById("decodeProgressWrap")
 const progressBar = document.getElementById("decodeProgressBar")
 const progressText = document.getElementById("decodeProgressText")
 const lockQuadEl = document.getElementById("lockQuad")
+const decodeDebugEl = document.getElementById("decodeDebug")
 const decodeChecklistEl = document.getElementById("decodeChecklist")
 const chkCornersRow = document.getElementById("chkCorners")
 const chkPayloadRow = document.getElementById("chkPayload")
@@ -634,6 +635,36 @@ const DECODE_ACCUM_MAX = 14
 let decodeFrameNo = 0
 let lastGoodQuad = null
 let lastGoodQuadAge = 0
+const decodeDbg = {
+  video: "—",
+  align: "no",
+  miss: 0,
+  sticky: 0,
+  accum: 0,
+  mean: 0,
+  std: 0,
+  sync: 0,
+  crc: "—",
+  last: "idle",
+  fps: "—"
+}
+let decodeDbgLastT = 0
+let decodeDbgFpsEma = 0
+
+function updateDecodeDebug(){
+  if(!decodeDebugEl) return
+  const lines = [
+    `frame ${decodeFrameNo} · ${decodeDbg.video} · ~${decodeDbg.fps} fps`,
+    `align ${decodeDbg.align} · miss ${decodeDbg.miss} · stickyAge ${decodeDbg.sticky}`,
+    `accum ${decodeDbg.accum}/${DECODE_ACCUM_MIN} · mean ${decodeDbg.mean.toFixed(1)} · std ${decodeDbg.std.toFixed(1)}`,
+    `syncHits ${decodeDbg.sync} · crc ${decodeDbg.crc}`,
+    rxFountain
+      ? `fountain ok=${rxDecodeCount} unique=${rxSymbols.size} sources=${countUniqueSources()}/${rxK ?? "?"}`
+      : `legacy chunks=${rxHave.size}/${rxTotal ?? "?"}`,
+    `last: ${decodeDbg.last}`
+  ]
+  decodeDebugEl.textContent = lines.join("\n")
+}
 
 function bilinearInQuad(u, v, tl, tr, br, bl){
   const x =
@@ -741,6 +772,9 @@ function bitsFromAccum(accum, frames){
     varSum += d * d
   }
   const std = Math.sqrt(varSum / DATA_COUNT)
+  decodeDbg.mean = mean
+  decodeDbg.std = std
+  decodeDbg.accum = frames
   const thr = mean + std * 0.12
   let bits = ""
   for(let i = 0; i < DATA_COUNT; i++) bits += (accum[i] / frames) > thr ? "1" : "0"
@@ -797,6 +831,8 @@ function sampleCloudBitsFromVideo(){
     lastGoodQuadAge = 0
     decodeAlignMiss = 0
     decodeAlignLocked = true
+    decodeDbg.align = "locked"
+    decodeDbg.sticky = 0
     updateLockOverlay(useQuad, { vw, vh, W, H, dw, dh, ox, oy })
   }else if(lastGoodQuad && lastGoodQuadAge < 10){
     // Glare can temporarily hide the corners; re-use the last stable quad.
@@ -804,11 +840,15 @@ function sampleCloudBitsFromVideo(){
     lastGoodQuadAge++
     decodeAlignMiss++
     decodeAlignLocked = lastGoodQuadAge <= 3
+    decodeDbg.align = "sticky"
+    decodeDbg.sticky = lastGoodQuadAge
     updateLockOverlay(useQuad, { vw, vh, W, H, dw, dh, ox, oy })
   }else{
     decodeAlignMiss++
     decodeAlignLocked = false
     lastGoodQuadAge++
+    decodeDbg.align = "fallback-center"
+    decodeDbg.sticky = lastGoodQuadAge
     if(lockQuadEl) lockQuadEl.style.display = "none"
     // Fallback: centered square (legacy path)
     const side = Math.min(dw, dh)
@@ -821,6 +861,9 @@ function sampleCloudBitsFromVideo(){
       bl: { x: fx, y: fy + side }
     }
   }
+  decodeDbg.miss = decodeAlignMiss
+  decodeDbg.video = `${vw}×${vh}`
+  decodeDbg.accum = decodeBitFrames
 
   const inset = SAMPLE_INSET
   const vals = new Float32Array(DATA_COUNT)
@@ -1116,18 +1159,27 @@ function tryFinish(){
 function bitsToPayload(bits){
   if(!bits || bits.length < SYNC.length + 16) return null
   let start = -1
+  let bestOk = 0
   for(let i = 0; i <= bits.length - SYNC.length; i++){
     let ok = 0
     for(let j = 0; j < SYNC.length; j++) if(bits[i + j] === SYNC[j]) ok++
+    if(ok > bestOk) bestOk = ok
     if(ok >= 28){ start = i; break }
   }
-  if(start < 0) return null
+  decodeDbg.sync = bestOk
+  if(start < 0){
+    decodeDbg.crc = "no-sync"
+    decodeDbg.last = `no SYNC (best ${bestOk}/32)`
+    return null
+  }
   const bodyBits = bits.slice(start + SYNC.length)
   const maxBytes = Math.min(520, (bodyBits.length / 8) | 0)
   // Frame bits are zero-padded to DATA_COUNT; scan body lengths until CRC matches.
+  let tried = 0
   for(let blen = 8; blen <= maxBytes; blen++){
     const body = bitsToBytes(bodyBits.slice(0, blen * 8))
     if(body.length < 5) continue
+    tried++
     const raw = body.subarray(0, body.length - 4)
     const crc =
       ((body[body.length - 4] << 24) |
@@ -1137,10 +1189,20 @@ function bitsToPayload(bits){
     if(crc32(raw) !== crc) continue
     try{
       const text = new TextDecoder().decode(raw)
-      if(text.startsWith("PC6M|") || text.startsWith("PC6|")) return text
-      if(text.startsWith("PC5M|") || text.startsWith("PC5D|")) return text
+      if(text.startsWith("PC6M|") || text.startsWith("PC6|")){
+        decodeDbg.crc = "ok"
+        decodeDbg.last = `payload ${text.slice(0, 28)}…`
+        return text
+      }
+      if(text.startsWith("PC5M|") || text.startsWith("PC5D|")){
+        decodeDbg.crc = "ok"
+        decodeDbg.last = `payload ${text.slice(0, 28)}…`
+        return text
+      }
     }catch(_){}
   }
+  decodeDbg.crc = "fail"
+  decodeDbg.last = `SYNC@${start} but CRC miss (${tried} lens)`
   return null
 }
 
@@ -1199,6 +1261,17 @@ async function startDecoder(){
   progressBar.style.width = "0%"
   progressText.textContent = "Frames: 0"
   if(decodeChecklistEl) decodeChecklistEl.hidden = false
+  if(decodeDebugEl){
+    decodeDebugEl.hidden = false
+    decodeDbg.last = "decoder started"
+    decodeDbg.crc = "—"
+    decodeDbg.sync = 0
+    decodeDbg.align = "no"
+    decodeDbg.miss = 0
+    decodeDbg.sticky = 0
+    decodeDbg.accum = 0
+    updateDecodeDebug()
+  }
   updateDecodeChecklist()
 
   let captureSettings = {}
@@ -1250,6 +1323,13 @@ async function startDecoder(){
 async function decodeLoop(){
   if(!decodeRunning) return
   decodeFrameNo++
+  const now = performance.now()
+  if(decodeDbgLastT){
+    const inst = 1000 / Math.max(1, now - decodeDbgLastT)
+    decodeDbgFpsEma = decodeDbgFpsEma ? decodeDbgFpsEma * 0.85 + inst * 0.15 : inst
+    decodeDbg.fps = decodeDbgFpsEma.toFixed(1)
+  }
+  decodeDbgLastT = now
   const have = rxFountain ? rxDecodeCount : rxHave.size
   const need = rxFountain
     ? (rxK != null
@@ -1269,6 +1349,7 @@ async function decodeLoop(){
   }
 
   updateDecodeChecklist()
+  updateDecodeDebug()
 
   // Primary: sample cloud bits
   if(video.videoWidth){
@@ -1282,10 +1363,18 @@ async function decodeLoop(){
           ? `${rxSymbols.size} symbols · peeling…`
           : `${rxHave.size}${rxTotal ? " / " + rxTotal : ""} frames`
         setStatus(`Locked cloud signal · ${prog}`)
+        decodeDbg.last = `ingested · ${prog}`
+        updateDecodeDebug()
         if(tryFinish()) return
       }else if(rxFountain && rxSymbols.size >= (rxK || 0)){
         if(tryFinish()) return
       }
+      updateDecodeDebug()
+    }else{
+      decodeDbg.last = decodeBitFrames < DECODE_ACCUM_MIN
+        ? `warming accum ${decodeBitFrames}/${DECODE_ACCUM_MIN}`
+        : "no bits yet"
+      updateDecodeDebug()
     }
   }
 
