@@ -305,6 +305,7 @@ attribute float aData;
 uniform float uTime;
 uniform float uSpin;
 uniform float uEncode;
+uniform float uPaper;
 
 varying float vSignal;
 varying float vFill;
@@ -341,9 +342,9 @@ void main(){
   vec4 mv = modelViewMatrix * vec4(pos, 1.0);
   vDepth = -mv.z;
 
-  float size = mix(2.2, mix(4.8, 14.0, uEncode * aData), aSignal) * mix(0.65, 1.05, aFill);
+  float size = mix(2.2, mix(4.8, mix(14.0, 17.0, uPaper), uEncode * aData), aSignal) * mix(0.65, 1.05, aFill);
   size *= mix(0.75, 1.15, aRadius);
-  float sizeCap = mix(9.0, 20.0, uEncode * aData);
+  float sizeCap = mix(9.0, mix(20.0, 24.0, uPaper), uEncode * aData);
   gl_PointSize = clamp(size * (220.0 / max(50.0, -mv.z)), 1.5, sizeCap);
 
   // Flat data bits: uniform brightness (sphere-facing term made the lower grid look dead).
@@ -362,6 +363,7 @@ varying float vSignal;
 varying float vFill;
 varying float vDepth;
 varying float vBright;
+uniform float uPaper;
 
 void main(){
   vec2 uv = gl_PointCoord * 2.0 - 1.0;
@@ -369,26 +371,31 @@ void main(){
   if(d > 1.0) discard;
 
   float r = sqrt(d);
-  // Orb sprite: white hot core → cyan → soft transparent edge
   float core = exp(-d * 5.5);
   float mid = exp(-d * 2.2);
   float edge = smoothstep(1.0, 0.35, r);
 
+  // White-paper TX: crisp black ink on white (zeros leave paper blank).
+  if(uPaper > 0.5){
+    float ink = smoothstep(0.4, 0.85, vSignal) * edge * (0.55 + 0.45 * core);
+    if(ink < 0.04) discard;
+    gl_FragColor = vec4(0.02, 0.02, 0.05, ink);
+    return;
+  }
+
   vec3 cWhite = vec3(1.0, 1.0, 1.0);
-  vec3 cCyan  = vec3(0.659, 0.953, 1.0);   // #A8F3FF
-  vec3 cBlue  = vec3(0.082, 0.486, 1.0);   // #157CFF
+  vec3 cCyan  = vec3(0.659, 0.953, 1.0);
+  vec3 cBlue  = vec3(0.082, 0.486, 1.0);
 
   vec3 col = mix(cBlue, cCyan, smoothstep(0.15, 0.72, 1.0 - r));
   col = mix(col, cWhite, core * 0.92 + mid * 0.08);
 
   float live = smoothstep(0.15, 0.55, vSignal);
   float alpha = edge * (core * 0.85 + mid * 0.45);
-  // Data zeros stay visible (dim lattice fills the square); ones punch bright.
-  float offFloor = mix(0.05, 0.22, step(0.9, vFill));
+  float offFloor = mix(0.05, 0.02, step(0.9, vFill));
   alpha *= mix(offFloor, 1.0, live) * mix(0.45, 1.0, vFill);
 
   col *= vBright * (0.7 + 0.55 * live);
-  // Depth fog only for decorative sphere — flat grid must stay even top-to-bottom.
   float fog = mix(1.0, 0.35 + 0.65 * smoothstep(5.8, 1.6, vDepth), 1.0 - step(0.9, vFill));
   alpha *= fog;
   col *= mix(0.68 + 0.32 * smoothstep(5.8, 1.6, vDepth), 1.0, step(0.9, vFill));
@@ -464,7 +471,8 @@ function initCloud(){
   uniforms = {
     uTime: { value: 0 },
     uSpin: { value: 0 },
-    uEncode: { value: 0 }
+    uEncode: { value: 0 },
+    uPaper: { value: 0 }
   }
 
   const mat = new THREE.ShaderMaterial({
@@ -513,8 +521,8 @@ function setSignalBits(bitStr, snap){
     }
   }
   for(let b = 0; b < DATA_COUNT; b++){
-    // Dim zeros keep the full lattice visible; bright ones carry the data.
-    const on = bitStr[b] === "1" ? 1 : 0.28
+    // Paper mode: 1 = black ink, 0 = blank paper (max contrast).
+    const on = bitStr[b] === "1" ? 1 : 0
     const base = b * BIT_REPS
     for(let r = 0; r < BIT_REPS; r++){
       signalTarget[DATA_INDICES[base + r]] = on
@@ -556,25 +564,35 @@ function renderLoop(now){
     uniforms.uTime.value = 0
     uniforms.uSpin.value = 0
     uniforms.uEncode.value = 1
+    uniforms.uPaper.value = 1
     points.rotation.set(0, 0, 0)
     camera.position.set(CAMERA_BASE.x, CAMERA_BASE.y, CAMERA_BASE.z)
     // Look straight down -Z (same height) — matches flat-grid placement (no pitch).
     camera.lookAt(CAMERA_BASE.x, CAMERA_BASE.y, 0)
+    renderer.setClearColor(0xffffff, 1)
+    points.material.blending = THREE.NormalBlending
+    canvasWrap.classList.add("tx-paper")
     if(bloomPass){
-      bloomPass.strength = 0.22
-      bloomPass.threshold = 0.62
+      bloomPass.enabled = false
+      bloomPass.strength = 0
+      bloomPass.threshold = 1
     }
   }else{
     uniforms.uTime.value = t
     uniforms.uSpin.value = t * 0.18
     uniforms.uEncode.value = 0
+    uniforms.uPaper.value = 0
     points.rotation.y = t * 0.12
     points.rotation.x = Math.sin(t * 0.15) * 0.08
     camera.position.x = CAMERA_BASE.x + Math.sin(t * 0.15) * 0.12
     camera.position.y = CAMERA_BASE.y + Math.cos(t * 0.18) * 0.08
     camera.position.z = CAMERA_BASE.z
     camera.lookAt(0, 0, 0)
+    renderer.setClearColor(0x000000, 1)
+    points.material.blending = THREE.AdditiveBlending
+    canvasWrap.classList.remove("tx-paper")
     if(bloomPass){
+      bloomPass.enabled = true
       bloomPass.strength = 1.12
       bloomPass.threshold = 0.52
     }
@@ -694,7 +712,7 @@ function encodeFile(file){
     canvasWrap.style.display = ""
     setSignalBits(frames[0], true)
     setStatus(
-      `Simple ${GRID_W}×${GRID_H} grid · ${DATA_COUNT} bits/frame · “${meta.name}” · ${frames.length} frames · point camera here`
+      `White paper · ${GRID_W}×${GRID_H} black dots · “${meta.name}” · ${frames.length} frames · point camera here`
     )
   }
   reader.readAsArrayBuffer(file)
@@ -798,6 +816,7 @@ function orderQuadCorners(pts){
 }
 
 function findBrightRegion(data, W, H, ox, oy, dw, dh){
+  // Prefer the bright white paper square (encode mode), not just glowing particles.
   let minX = W, minY = H, maxX = 0, maxY = 0, n = 0
   const step = 2
   const x1 = (ox + dw) | 0
@@ -809,7 +828,7 @@ function findBrightRegion(data, W, H, ox, oy, dw, dh){
       const r8 = data[p], g = data[p + 1], b = data[p + 2]
       const peak = Math.max(r8, g, b)
       const luma = r8 * 0.299 + g * 0.587 + b * 0.114
-      // Particle cloud / bloom — ignore dark chrome around the Mac window.
+      // White paper or bright cloud — ignore dark chrome around the Mac window.
       if(peak < 55 || luma < 35) continue
       minX = Math.min(minX, x)
       minY = Math.min(minY, y)
@@ -893,25 +912,26 @@ function sampleLumaAt(data, W, H, x, y){
       if(xx < 0 || yy < 0 || xx >= W || yy >= H) continue
       const p = (yy * W + xx) * 4
       const bb = data[p + 2], g = data[p + 1], r8 = data[p]
-      const peak = Math.max(r8, g, bb)
-      const sat = peak - Math.min(r8, g, bb)
-      if(peak > 195 && sat < 35 && r8 > peak * 0.9) continue
       const luma = r8 * 0.299 + g * 0.587 + bb * 0.114
-      const cyan = Math.max(0, (g + bb) * 0.5 - r8 * 0.3)
-      acc += luma * 0.35 + peak * 0.35 + cyan * 0.3
+      acc += luma
       n++
     }
   }
-  return n ? acc / n : 0
+  return n ? acc / n : 255
 }
 
-// Search a small window for the brightest patch — tolerates a few px of UV error.
+// White-paper TX: bit=1 is black ink. Return ink amount (higher = darker = 1).
+function sampleInkAt(data, W, H, x, y){
+  return Math.max(0, 255 - sampleLumaAt(data, W, H, x, y))
+}
+
+// Search a small window for the darkest patch (strongest ink).
 function samplePeakAt(data, W, H, x, y, radius){
   const r = Math.max(1, radius | 0)
   let best = 0
   for(let dy = -r; dy <= r; dy++){
     for(let dx = -r; dx <= r; dx++){
-      const v = sampleLumaAt(data, W, H, x + dx, y + dy)
+      const v = sampleInkAt(data, W, H, x + dx, y + dy)
       if(v > best) best = v
     }
   }
@@ -1627,7 +1647,7 @@ async function startDecoder(){
   decodeRunning = true
   const showCaptureStatus = () => {
     const capLabel = formatCaptureLabel(captureSettings, video.videoWidth, video.videoHeight)
-    setStatus(`Point at the cloud · fill view with screen · cyan corners visible · ${capLabel}. Tilt to kill glare.`)
+    setStatus(`Point at the white square · fill view · cyan corners visible · ${capLabel}.`)
   }
   showCaptureStatus()
   video.addEventListener("loadedmetadata", () => {
