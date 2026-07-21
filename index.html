@@ -13,7 +13,7 @@
 <body>
   <header>
     <h1>PartiCl</h1>
-    <p class="tagline">Dot QR · MDS · <span id="buildId">154720</span></p>
+    <p class="tagline">Dot QR · MDS · <span id="buildId">154730</span></p>
   </header>
 
   <input type="file" id="fileInput" hidden>
@@ -95,9 +95,10 @@
   <script src="vendor/jsqr/jsQR.js"></script>
   <script src="vendor/zxing/zxing.min.js"></script>
   <script>
-    // White square · square finder corners · black dots for ALL data modules.
-    // (Cropping into a circle drops ECC/data bits and breaks ZXing/jsQR.)
+    // White square · square finder corners · black dots for every data module (full square).
     // Optional window.__particlQrType (1–40) locks version so finders don't jump between frames.
+    window.__particlIdlePayload =
+      "PartiCl QR ready - Encode a file | pad:" + Array(181).join("x");
     window.__particlPaintCloud = function(text){
       var c = document.getElementById("cloud");
       var wrap = document.getElementById("canvasWrap");
@@ -133,22 +134,12 @@
       ctx.fillRect(0, 0, size, size);
 
       var origin = quiet * cell;
-      var mid = (n - 1) / 2;
-      var cx = origin + (mid + 0.5) * cell;
-      var cy = origin + (mid + 0.5) * cell;
       var dotRad = cell * 0.48;
 
       function inPat(rr, cc){ return rr >= 0 && rr < 7 && cc >= 0 && cc < 7; }
       function isFinder(r, col){
         return inPat(r, col) || inPat(r, col - (n - 7)) || inPat(r - (n - 7), col);
       }
-
-      // Soft circle guide only — does not hide modules
-      ctx.beginPath();
-      ctx.arc(cx, cy, (mid - 0.2) * cell, 0, Math.PI * 2);
-      ctx.strokeStyle = "rgba(0,0,0,0.06)";
-      ctx.lineWidth = Math.max(1, cell * 0.08);
-      ctx.stroke();
 
       ctx.fillStyle = "#000000";
       for(var r = 0; r < n; r++){
@@ -167,10 +158,10 @@
       }
       return true;
     };
-    window.__particlPaintCloud("PartiCl QR ready - Encode a file");
+    window.__particlPaintCloud(window.__particlIdlePayload);
     var st = document.getElementById("status");
     if(st) st.textContent = "Boot dot-QR · loading module…";
   </script>
-  <script type="module" src="app-qr.js?v=154720"></script>
+  <script type="module" src="app-qr.js?v=154730"></script>
 </body>
 </html>

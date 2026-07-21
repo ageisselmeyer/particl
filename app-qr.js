@@ -1114,7 +1114,7 @@ function bootQr(){
       throw new Error("vendor/qrcode/qrcode.js did not expose window.qrcode")
     }
     window.__particlQrType = 0
-    drawQrToCanvas("PartiCl QR ready - Encode a file")
+    drawQrToCanvas(window.__particlIdlePayload || "PartiCl QR ready - Encode a file")
     ensureRs().catch((e) => console.warn("RS preload failed", e))
     setStatus("QR · Encode a file — or Decode with the camera.")
   }catch(err){
