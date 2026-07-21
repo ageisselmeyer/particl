@@ -47,8 +47,8 @@ function setStatus(msg){
 const PARTICLE_COUNT = 8000
 const BIT_REPS = 1
 const GRID_W = 32
-const GRID_H = 32
-const DATA_COUNT = GRID_W * GRID_H // 1024 bits/frame — must fit PC6/PC6M (~400–700 bits)
+const GRID_H = 22
+const DATA_COUNT = GRID_W * GRID_H // 704 bits — fits PC6M (~688) with larger cells in the top band
 const PHYS_COUNT = DATA_COUNT * BIT_REPS
 const FRAME_HOLD_MS = 1800
 const FRAME_BLEND_MS = 0
@@ -56,7 +56,9 @@ const SYMBOL_SIZE = 16
 
 // Cyan L-brackets sit at this inset (CSS %). Sample UVs are relative to that frame.
 const ALIGN_MARKER_UV = 0.04
-const SAMPLE_INSET = 0.06
+const SAMPLE_INSET = 0.05
+// Keep payload out of the bottom glare band (phone reflection on glossy screens).
+const GRID_V_MAX = 0.62
 
 const SYNC = "11001100111100001010101011001100" // 32-bit
 
@@ -215,9 +217,9 @@ const DATA_INDICES = (() => {
   for(let b = 0; b < PHYS_COUNT; b++){
     const gx = b % GRID_W
     const gy = (b / GRID_W) | 0
-    // Regular grid in align-marker space, with margin so edge bits stay inside the L-frame.
+    // Regular grid in align-marker space — only the top GRID_V_MAX band (avoid bottom glare).
     const uAlign = inset + ((gx + 0.5) / GRID_W) * (1 - inset * 2)
-    const vAlign = inset + ((gy + 0.5) / GRID_H) * (1 - inset * 2)
+    const vAlign = inset + ((gy + 0.5) / GRID_H) * (GRID_V_MAX - inset)
     const uCanvas = m + uAlign * (1 - 2 * m)
     const vCanvas = m + vAlign * (1 - 2 * m)
     // Place on plane so screen UV matches (camera looks down -Z, no pitch).
@@ -341,12 +343,17 @@ void main(){
   vec4 mv = modelViewMatrix * vec4(pos, 1.0);
   vDepth = -mv.z;
 
-  float size = mix(2.2, mix(4.8, 11.0, uEncode * aData), aSignal) * mix(0.65, 1.05, aFill);
+  float size = mix(2.2, mix(4.8, 14.0, uEncode * aData), aSignal) * mix(0.65, 1.05, aFill);
   size *= mix(0.75, 1.15, aRadius);
-  float sizeCap = mix(9.0, 16.0, uEncode * aData);
+  float sizeCap = mix(9.0, 20.0, uEncode * aData);
   gl_PointSize = clamp(size * (220.0 / max(50.0, -mv.z)), 1.5, sizeCap);
 
-  vBright = mix(0.55, 1.0, aData) + 0.45 * smoothstep(-0.2, 0.85, -normalize((modelViewMatrix * vec4(normalize(position), 0.0)).z));
+  // Flat data bits: uniform brightness (sphere-facing term made the lower grid look dead).
+  if(aData > 0.5){
+    vBright = mix(1.0, 1.45, uEncode);
+  }else{
+    vBright = 0.55 + 0.45 * smoothstep(-0.2, 0.85, -normalize((modelViewMatrix * vec4(normalize(position), 0.0)).z));
+  }
   gl_Position = projectionMatrix * mv;
 }
 `
@@ -376,14 +383,17 @@ void main(){
   vec3 col = mix(cBlue, cCyan, smoothstep(0.15, 0.72, 1.0 - r));
   col = mix(col, cWhite, core * 0.92 + mid * 0.08);
 
-  float live = smoothstep(0.12, 0.55, vSignal);
+  float live = smoothstep(0.08, 0.45, vSignal);
   float alpha = edge * (core * 0.85 + mid * 0.45);
-  alpha *= mix(0.05, 1.0, live) * mix(0.45, 1.0, vFill);
+  // Harder OFF during encode: nearly invisible zeros, punchy ones.
+  float offFloor = mix(0.05, 0.02, step(0.9, vFill));
+  alpha *= mix(offFloor, 1.0, live) * mix(0.45, 1.0, vFill);
 
   col *= vBright * (0.7 + 0.55 * live);
-  float fog = smoothstep(5.8, 1.6, vDepth);
-  alpha *= 0.35 + 0.65 * fog;
-  col *= 0.68 + 0.32 * fog;
+  // Depth fog only for decorative sphere — flat grid must stay even top-to-bottom.
+  float fog = mix(1.0, 0.35 + 0.65 * smoothstep(5.8, 1.6, vDepth), 1.0 - step(0.9, vFill));
+  alpha *= fog;
+  col *= mix(0.68 + 0.32 * smoothstep(5.8, 1.6, vDepth), 1.0, step(0.9, vFill));
 
   gl_FragColor = vec4(col * (0.65 + 0.75 * live), alpha);
 }
@@ -644,12 +654,13 @@ function buildFrames(fileBytes, fileMeta){
     }
     const raw = new TextEncoder().encode(payload)
     const crc = crc32(raw)
-    const body = new Uint8Array(raw.length + 4)
-    body.set(raw, 0)
-    body[raw.length] = (crc >>> 24) & 255
-    body[raw.length + 1] = (crc >>> 16) & 255
-    body[raw.length + 2] = (crc >>> 8) & 255
-    body[raw.length + 3] = crc & 255
+    // CRC first (top of grid, next to SYNC) — suffix CRC sat in the glare zone and always failed.
+    const body = new Uint8Array(4 + raw.length)
+    body[0] = (crc >>> 24) & 255
+    body[1] = (crc >>> 16) & 255
+    body[2] = (crc >>> 8) & 255
+    body[3] = crc & 255
+    body.set(raw, 4)
 
     let bits = SYNC + bytesToBits(body)
     if(bits.length > DATA_COUNT){
@@ -1385,6 +1396,35 @@ function tryFinish(){
 function decodeBodyText(bodyBits, startLabel){
   const maxBytes = Math.min(520, (bodyBits.length / 8) | 0)
   let tried = 0
+  if(maxBytes < 5) return { text: null, tried, startLabel }
+
+  const tryText = (raw, label) => {
+    try{
+      const text = new TextDecoder().decode(raw)
+      if(text.startsWith("PC6M|") || text.startsWith("PC6|") ||
+         text.startsWith("PC5M|") || text.startsWith("PC5D|")){
+        return { text, tried, startLabel: label }
+      }
+    }catch(_){}
+    return null
+  }
+
+  // CRC-prefixed body (current): [crc32:4][raw…] — sits next to SYNC at top of grid.
+  for(let rawLen = 4; rawLen <= maxBytes - 4; rawLen++){
+    const body = bitsToBytes(bodyBits.slice(0, (rawLen + 4) * 8))
+    tried++
+    const crc =
+      ((body[0] << 24) |
+        (body[1] << 16) |
+        (body[2] << 8) |
+        body[3]) >>> 0
+    const raw = body.subarray(4, 4 + rawLen)
+    if(crc32(raw) !== crc) continue
+    const hit = tryText(raw, startLabel)
+    if(hit) return hit
+  }
+
+  // Legacy CRC-suffix body: [raw…][crc32:4]
   for(let blen = 8; blen <= maxBytes; blen++){
     const body = bitsToBytes(bodyBits.slice(0, blen * 8))
     if(body.length < 5) continue
@@ -1396,13 +1436,8 @@ function decodeBodyText(bodyBits, startLabel){
         (body[body.length - 2] << 8) |
         body[body.length - 1]) >>> 0
     if(crc32(raw) !== crc) continue
-    try{
-      const text = new TextDecoder().decode(raw)
-      if(text.startsWith("PC6M|") || text.startsWith("PC6|") ||
-         text.startsWith("PC5M|") || text.startsWith("PC5D|")){
-        return { text, tried, startLabel }
-      }
-    }catch(_){}
+    const hit = tryText(raw, startLabel + "/legacy")
+    if(hit) return hit
   }
   return { text: null, tried, startLabel }
 }
