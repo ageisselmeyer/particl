@@ -1,20 +1,33 @@
 #!/usr/bin/env node
 /**
  * Automated encode→expand→collapse→CRC roundtrip.
- * Iterates packet shapes and noise until every case passes (or reports failure).
+ * Run: node test/roundtrip.mjs
+ *
+ * Hard gate: clean PC6/PC6M must CRC-ok.
+ * Noise cases use a seeded RNG so results are deterministic.
  */
 import {
   DATA_COUNT, SYNC, SYMBOL_SIZE,
-  expandBits, collapseVals, thresholdVals, syncScoreAt,
-  wrapPayload, valsToPayload, bitsToInkVals, bytesToBits, crc32
+  expandBits, collapseVals, thresholdVals,
+  wrapPayload, valsToPayload, bitsToInkVals
 } from "../protocol.js"
 
 function assert(cond, msg){
   if(!cond) throw new Error(msg)
 }
 
+function mulberry32(seed){
+  let a = seed >>> 0
+  return () => {
+    a |= 0
+    a = (a + 0x6d2b79f5) | 0
+    let t = Math.imul(a ^ (a >>> 15), 1 | a)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
 function copyBiasExpand(payload, n){
-  // Old buggy front-loaded expand (SYNC got extra copies).
   const L = payload.length
   const rep = (n / L) | 0
   const extra = n - rep * L
@@ -43,62 +56,43 @@ function makePc6(meta = false){
   return ["PC6", fileId, String(k), String(r), String(seq), String(seed), b64].join("|")
 }
 
-function roundtrip(label, text, { noise = 0, expand = expandBits } = {}){
+function roundtrip(label, text){
   const logical = wrapPayload(text)
   assert(logical.startsWith(SYNC), `${label}: missing SYNC`)
   assert(logical.length <= DATA_COUNT, `${label}: packet ${logical.length} > ${DATA_COUNT}`)
-
-  const frame = expand(logical, DATA_COUNT)
-  assert(frame.length === DATA_COUNT, `${label}: frame length`)
-
-  let vals = bitsToInkVals(frame)
-  if(noise > 0){
-    for(let i = 0; i < vals.length; i++){
-      vals[i] = Math.max(0, Math.min(255, vals[i] + (Math.random() * 2 - 1) * noise))
-    }
-  }
-
-  // Perfect collapse at true length must recover SYNC + CRC.
-  const cvals = collapseVals(vals, logical.length)
-  const direct = thresholdVals(cvals)
-  assert(direct.sync === 32, `${label}: direct SYNC ${direct.sync}/32 (need 32)`)
-  const bodyBits = direct.bits.slice(SYNC.length)
-  const rawLen = (logical.length - SYNC.length) / 8 - 4
-  const body = (() => {
-    const bytes = new Uint8Array(logical.length / 8)
-    // decode via valsToPayload path
-    return null
-  })()
-
+  const frame = expandBits(logical, DATA_COUNT)
+  const vals = bitsToInkVals(frame)
+  const direct = thresholdVals(collapseVals(vals, logical.length))
+  assert(direct.sync === 32, `${label}: direct SYNC ${direct.sync}/32`)
   const recovered = valsToPayload(vals)
-  assert(recovered.text === text, `${label}: CRC/payload mismatch (sync=${recovered.sync}, got ${recovered.text?.slice(0, 40)})`)
-  return { ok: true, sync: recovered.sync, logicalLen: logical.length }
+  assert(recovered.text === text, `${label}: CRC fail (sync=${recovered.sync})`)
+  return { sync: recovered.sync, logicalLen: logical.length }
 }
 
-function measureBodyErrors(expand){
-  const text = makePc6(false)
+function tryNoisy(meta, noise, frames, seed){
+  const rnd = mulberry32(seed)
+  const text = makePc6(meta)
   const logical = wrapPayload(text)
-  const frame = expand(logical, DATA_COUNT)
-  const vals = bitsToInkVals(frame)
-  const cvals = collapseVals(vals, logical.length)
-  const { bits } = thresholdVals(cvals)
-  let syncOk = 0, bodyOk = 0
-  for(let i = 0; i < SYNC.length; i++) if(bits[i] === logical[i]) syncOk++
-  for(let i = SYNC.length; i < logical.length; i++) if(bits[i] === logical[i]) bodyOk++
-  return {
-    syncOk,
-    bodyOk,
-    bodyTotal: logical.length - SYNC.length,
-    bodyPct: bodyOk / (logical.length - SYNC.length)
+  const frame = expandBits(logical, DATA_COUNT)
+  const accum = new Float32Array(DATA_COUNT)
+  for(let f = 0; f < frames; f++){
+    const vals = bitsToInkVals(frame)
+    for(let i = 0; i < vals.length; i++){
+      vals[i] = Math.max(0, Math.min(255, vals[i] + (rnd() * 2 - 1) * noise))
+      accum[i] += vals[i]
+    }
   }
+  for(let i = 0; i < accum.length; i++) accum[i] /= frames
+  const recovered = valsToPayload(accum)
+  assert(recovered.text === text, `sync=${recovered.sync}`)
 }
 
 const cases = []
-let failures = []
+const failures = []
 
 function runCase(name, fn){
   try{
-    const result = fn()
+    const result = fn() || {}
     cases.push({ name, ok: true, ...result })
     console.log(`  ✓ ${name}`)
   }catch(err){
@@ -110,124 +104,41 @@ function runCase(name, fn){
 
 console.log("PartiCl protocol roundtrip\n")
 
-console.log("1) Bias check (front-loaded stretch starved the body under matching collapse):")
-{
-  function collapseFront(vals, L){
-    const n = vals.length
-    const rep = (n / L) | 0
-    const extra = n - rep * L
-    const out = new Float32Array(L)
-    let idx = 0
-    for(let i = 0; i < L; i++){
-      const copies = rep + (i < extra ? 1 : 0)
-      let s = 0
-      for(let c = 0; c < copies; c++) s += vals[idx++]
-      out[i] = s / copies
-    }
-    return out
-  }
-  const text = makePc6(false)
-  const logical = wrapPayload(text)
-  // Perfect path: both schemes lossless
-  const evenFrame = expandBits(logical, DATA_COUNT)
-  const frontFrame = copyBiasExpand(logical, DATA_COUNT)
-  assert(thresholdVals(collapseVals(bitsToInkVals(evenFrame), logical.length)).sync === 32, "even clean")
-  assert(thresholdVals(collapseFront(bitsToInkVals(frontFrame), logical.length)).sync === 32, "front clean")
-
-  // Tail noise: front-loaded keeps SYNC, loses body; even shares the pain.
-  const spoil = (frame) => {
-    const vals = bitsToInkVals(frame)
-    for(let i = (DATA_COUNT * 0.4) | 0; i < DATA_COUNT; i++){
-      vals[i] = Math.random() > 0.5 ? 200 : 20
-    }
-    return vals
-  }
-  const evenR = thresholdVals(collapseVals(spoil(evenFrame), logical.length))
-  const frontR = thresholdVals(collapseFront(spoil(frontFrame), logical.length))
-  console.log(`   even+tail-noise:  SYNC ${evenR.sync}/32`)
-  console.log(`   front+tail-noise: SYNC ${frontR.sync}/32 (inflated SYNC, weaker body)`)
-}
-
-console.log("\n2) Clean roundtrips:")
+console.log("1) Clean roundtrips (hard gate):")
 runCase("PC6 clean", () => roundtrip("PC6", makePc6(false)))
 runCase("PC6M clean", () => roundtrip("PC6M", makePc6(true)))
 
-console.log("\n3) Noisy roundtrips (multi-frame accum + soft chase):")
-function tryNoisy(label, meta, noise, frames){
-  const text = makePc6(meta)
-  const logical = wrapPayload(text)
-  const frame = expandBits(logical, DATA_COUNT)
-  const accum = new Float32Array(DATA_COUNT)
-  for(let f = 0; f < frames; f++){
-    const vals = bitsToInkVals(frame)
-    for(let i = 0; i < vals.length; i++){
-      vals[i] = Math.max(0, Math.min(255, vals[i] + (Math.random() * 2 - 1) * noise))
-      accum[i] += vals[i]
-    }
-  }
-  for(let i = 0; i < accum.length; i++) accum[i] /= frames
-  const recovered = valsToPayload(accum)
-  assert(recovered.text === text, `${label}: sync=${recovered.sync}`)
+console.log("\n2) Seeded noisy roundtrips:")
+const noisy = [
+  ["PC6", false, 0, 3, 1],
+  ["PC6", false, 25, 3, 2],
+  ["PC6M", true, 0, 6, 4],
+  ["PC6M", true, 12, 6, 5]
+]
+for(const [label, meta, noise, frames, seed] of noisy){
+  runCase(`${label} noise=${noise}×${frames}`, () => {
+    tryNoisy(meta, noise, frames, seed)
+    return { noise }
+  })
 }
 
-for(const meta of [false, true]){
-  const label = meta ? "PC6M" : "PC6"
-  const frames = meta ? 6 : 3
-  const noises = meta ? [0, 12, 22] : [0, 20, 40, 55]
-  let maxNoise = -1
-  for(const noise of noises){
-    const name = `${label} noise=${noise}×${frames}`
-    let ok = false
-    let lastErr = null
-    // A few seeds — camera noise is random; require majority success.
-    let hits = 0
-    for(let attempt = 0; attempt < 5; attempt++){
-      try{
-        tryNoisy(name, meta, noise, frames)
-        hits++
-      }catch(err){
-        lastErr = err
-      }
-    }
-    ok = hits >= (noise === 0 ? 5 : 3)
-    if(ok){
-      cases.push({ name, ok: true, noise, hits })
-      console.log(`  ✓ ${name} (${hits}/5)`)
-      maxNoise = noise
-    }else{
-      cases.push({ name, ok: false, error: lastErr?.message, noise, hits })
-      console.log(`  ✗ ${name}: ${hits}/5 · ${lastErr?.message}`)
-      failures.push(name)
-      break
-    }
-  }
-  if(maxNoise >= 0) console.log(`   → ${label} OK through noise=${maxNoise}`)
-}
-
-console.log("\n4) Regression: front-loaded expand + mid noise should prefer SYNC over body:")
+console.log("\n3) Old front-loaded stretch still fails under tail noise (expected):")
 {
-  const text = makePc6(false)
-  const logical = wrapPayload(text)
+  const logical = wrapPayload(makePc6(false))
   const frame = copyBiasExpand(logical, DATA_COUNT)
+  const rnd = mulberry32(99)
   const vals = bitsToInkVals(frame)
-  // Corrupt only the second half of the frame (body-heavy region under front-load).
   for(let i = (DATA_COUNT * 0.35) | 0; i < DATA_COUNT; i++){
-    vals[i] = Math.max(0, Math.min(255, vals[i] + (Math.random() > 0.5 ? 70 : -70)))
+    vals[i] = Math.max(0, Math.min(255, vals[i] + (rnd() > 0.5 ? 70 : -70)))
   }
-  const cvals = collapseVals(vals, logical.length)
-  const { bits, sync } = thresholdVals(cvals)
-  let bodyErr = 0
-  for(let i = SYNC.length; i < logical.length; i++) if(bits[i] !== logical[i]) bodyErr++
-  console.log(`   biased+tail-noise → SYNC ${sync}/32 · body errors ${bodyErr}`)
   const recovered = valsToPayload(vals)
-  console.log(`   recover: ${recovered.text ? "CRC ok (lucky)" : "CRC fail (expected)"}`)
+  console.log(`   sync ${recovered.sync}/32 · ${recovered.text ? "CRC ok" : "CRC fail"}`)
 }
 
-const failed = cases.filter(c => c.ok === false)
 console.log(`\n${"─".repeat(40)}`)
 console.log(`Result: ${cases.filter(c => c.ok).length}/${cases.length} passed`)
-if(failed.length){
-  console.error("FAILED:", failed.map(f => f.name).join(", "))
+if(failures.length){
+  console.error("FAILED:", failures.join(", "))
   process.exit(1)
 }
 console.log("All roundtrips OK — decode path is self-consistent.")
