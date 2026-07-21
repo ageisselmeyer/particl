@@ -310,12 +310,18 @@ function spawnCloudFromText(text){
 function ensureCloudCanvas(){
   if(!cloudCanvas) throw new Error("cloud canvas missing")
   cloudCanvas.hidden = false
-  // Fixed backing store — don't depend on clientWidth (0 during early layout → blank white canvas)
+  cloudCanvas.style.display = "block"
+  cloudCanvas.style.background = "#000"
+  // Fixed backing store. Do NOT pass {alpha:false} — if a 2d context was
+  // already created (classic boot script), mismatched attrs return null and
+  // leave a cleared white canvas.
   if(cloudCanvas.width !== CLOUD_PIXEL || cloudCanvas.height !== CLOUD_PIXEL){
     cloudCanvas.width = CLOUD_PIXEL
     cloudCanvas.height = CLOUD_PIXEL
   }
-  return cloudCanvas.getContext("2d", { alpha: false })
+  const ctx = cloudCanvas.getContext("2d")
+  if(!ctx) throw new Error("2d context unavailable")
+  return ctx
 }
 
 function paintParticleCloud(now){
@@ -1006,22 +1012,47 @@ async function decodeLoop(){
 
 // Boot — idle particle QR cloud
 function bootQr(){
-  showQrUi()
   try{
+    showQrUi()
     if(typeof (globalThis.qrcode || window.qrcode) !== "function"){
       throw new Error("vendor/qrcode/qrcode.js did not expose window.qrcode")
     }
+    // Ensure we can get a context before clearing/painting
+    const ctx = ensureCloudCanvas()
+    ctx.fillStyle = "#000"
+    ctx.fillRect(0, 0, CLOUD_PIXEL, CLOUD_PIXEL)
+
     drawQrToCanvas("PartiCl QR ready - Encode a file")
     const idle = (now) => {
-      if(frames.length) return // encode loop takes over
-      paintParticleCloud(now)
+      if(frames.length) return
+      try{ paintParticleCloud(now) }catch(e){ console.error(e); return }
       requestAnimationFrame(idle)
     }
     requestAnimationFrame(idle)
     setStatus("Particle QR · Encode a file — or Decode with the camera.")
   }catch(err){
     console.error(err)
-    setStatus(`QR library failed: ${err.message || err}`)
+    setStatus(`Cloud failed: ${err.message || err}`)
+    // Last resort: crisp QR img so the box is never empty white
+    try{
+      const qr = getQrCode()(0, QR_ECC)
+      qr.addData("PartiCl fallback", "Byte")
+      qr.make()
+      if(qrImg){
+        qrImg.hidden = false
+        qrImg.style.display = "block"
+        qrImg.style.position = "absolute"
+        qrImg.style.inset = "0"
+        qrImg.style.width = "100%"
+        qrImg.style.height = "100%"
+        qrImg.style.objectFit = "contain"
+        qrImg.style.background = "#000"
+        qrImg.src = qr.createDataURL(8, 6)
+        if(cloudCanvas) cloudCanvas.style.opacity = "0"
+      }
+    }catch(e2){
+      console.error(e2)
+    }
   }
 }
 if(document.readyState === "loading"){
