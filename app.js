@@ -51,8 +51,8 @@ const GRID_H = 32
 const DATA_COUNT = GRID_W * GRID_H // 1024 bits/frame — fills the full align square
 const PHYS_COUNT = DATA_COUNT * BIT_REPS
 const ALIGN_MARKER_UV = 0.04
-const SAMPLE_INSET = 0.07
-const FRAME_HOLD_MS = 2200
+const SAMPLE_INSET = 0.06
+const FRAME_HOLD_MS = 1800
 const FRAME_BLEND_MS = 0
 const SYMBOL_SIZE = 16
 
@@ -252,31 +252,40 @@ function bitsToBytes(bits){
   return out
 }
 
-// Fill the full square evenly — each payload bit gets a contiguous run of cells.
-// (Front-loading extras onto SYNC caused 32/32 SYNC with CRC-fail on the body.)
+// Fill the full square: block-repeat payload bits across all DATA_COUNT cells.
+// Front-loaded extras (matched collapse) — this is what reached SYNC 32/32 on device.
 function expandBits(payload, n){
   const L = payload.length
   if(L <= 0) return "0".repeat(n)
   if(L >= n) return payload.slice(0, n)
-  const out = new Array(n)
+  const rep = (n / L) | 0
+  const extra = n - rep * L
+  let out = ""
   for(let i = 0; i < L; i++){
-    const a = Math.floor(i * n / L)
-    const b = Math.floor((i + 1) * n / L)
-    for(let j = a; j < b; j++) out[j] = payload[i]
+    const copies = rep + (i < extra ? 1 : 0)
+    const bit = payload[i]
+    for(let c = 0; c < copies; c++) out += bit
   }
-  return out.join("")
+  return out
 }
 
 function collapseVals(vals, targetLen){
   const n = vals.length
   const L = targetLen
+  if(L >= n){
+    const out = new Float32Array(L)
+    out.set(vals.length >= L ? vals.subarray(0, L) : vals)
+    return out
+  }
+  const rep = (n / L) | 0
+  const extra = n - rep * L
   const out = new Float32Array(L)
+  let idx = 0
   for(let i = 0; i < L; i++){
-    const a = Math.floor(i * n / L)
-    const b = Math.max(a + 1, Math.floor((i + 1) * n / L))
+    const copies = rep + (i < extra ? 1 : 0)
     let s = 0
-    for(let j = a; j < b; j++) s += vals[j]
-    out[i] = s / (b - a)
+    for(let c = 0; c < copies; c++) s += vals[idx++]
+    out[i] = s / copies
   }
   return out
 }
@@ -369,9 +378,8 @@ void main(){
   vec4 mv = modelViewMatrix * vec4(pos, 1.0);
   vDepth = -mv.z;
 
-  float size = mix(2.2, mix(4.8, mix(14.0, 16.0, uPaper), uEncode * aData), aSignal) * mix(0.65, 1.05, aFill);
+  float size = mix(2.2, mix(4.8, mix(14.0, 17.0, uPaper), uEncode * aData), aSignal) * mix(0.65, 1.05, aFill);
   size *= mix(0.75, 1.15, aRadius);
-  // Thick discs phone cameras can resolve; center-sampling + deblur handle mild overlap.
   float sizeCap = mix(9.0, mix(20.0, 24.0, uPaper), uEncode * aData);
   gl_PointSize = clamp(size * (220.0 / max(50.0, -mv.z)), 1.5, sizeCap);
 
@@ -403,11 +411,11 @@ void main(){
   float mid = exp(-d * 2.2);
   float edge = smoothstep(1.0, 0.35, r);
 
-  // White-paper TX: solid black discs (thick enough for phone cameras).
+  // White-paper TX: crisp black ink on white (zeros leave paper blank).
   if(uPaper > 0.5){
-    float ink = smoothstep(0.92, 0.35, r) * smoothstep(0.3, 0.75, vSignal);
+    float ink = smoothstep(0.4, 0.85, vSignal) * edge * (0.55 + 0.45 * core);
     if(ink < 0.04) discard;
-    gl_FragColor = vec4(0.0, 0.0, 0.0, ink);
+    gl_FragColor = vec4(0.02, 0.02, 0.05, ink);
     return;
   }
 
@@ -791,8 +799,8 @@ let decodeBitAccum = null
 let decodeBitFrames = 0
 let decodeAlignLocked = false
 let decodeAlignMiss = 0
-const DECODE_ACCUM_MIN = 6
-const DECODE_ACCUM_MAX = 12
+const DECODE_ACCUM_MIN = 4
+const DECODE_ACCUM_MAX = 8
 let decodeFrameNo = 0
 let lastGoodQuad = null
 let lastGoodQuadAge = 0
@@ -952,44 +960,17 @@ function sampleInkAt(data, W, H, x, y){
   return Math.max(0, 255 - sampleLumaAt(data, W, H, x, y))
 }
 
-// Center-heavy ink sample with a tiny local max — thick soft dots still register.
-function sampleCenterInk(data, W, H, x, y){
-  let peak = 0
-  for(let dy = -2; dy <= 2; dy++){
-    for(let dx = -2; dx <= 2; dx++){
-      const w = (dx === 0 && dy === 0) ? 3 : (Math.abs(dx) + Math.abs(dy) === 1 ? 1.2 : 0.35)
+// Search a small window for the darkest patch (strongest ink).
+function samplePeakAt(data, W, H, x, y, radius){
+  const r = Math.max(1, radius | 0)
+  let best = 0
+  for(let dy = -r; dy <= r; dy++){
+    for(let dx = -r; dx <= r; dx++){
       const v = sampleInkAt(data, W, H, x + dx, y + dy)
-      if(v > peak) peak = v
-      // also accumulate for blend
+      if(v > best) best = v
     }
   }
-  // Prefer peak of a small neighborhood (soft AF) but stay near the cell center.
-  let acc = sampleInkAt(data, W, H, x, y) * 2
-  acc += sampleInkAt(data, W, H, x - 1, y)
-  acc += sampleInkAt(data, W, H, x + 1, y)
-  acc += sampleInkAt(data, W, H, x, y - 1)
-  acc += sampleInkAt(data, W, H, x, y + 1)
-  const center = acc / 6
-  return center * 0.45 + peak * 0.55
-}
-
-// Mild spatial unsharp on the bit grid to undo camera blur bleed.
-function deblurBitGrid(vals){
-  const out = new Float32Array(DATA_COUNT)
-  const k = 0.22
-  for(let gy = 0; gy < GRID_H; gy++){
-    for(let gx = 0; gx < GRID_W; gx++){
-      const i = gy * GRID_W + gx
-      let neigh = 0, n = 0
-      if(gx > 0){ neigh += vals[i - 1]; n++ }
-      if(gx < GRID_W - 1){ neigh += vals[i + 1]; n++ }
-      if(gy > 0){ neigh += vals[i - GRID_W]; n++ }
-      if(gy < GRID_H - 1){ neigh += vals[i + GRID_W]; n++ }
-      const meanN = n ? neigh / n : vals[i]
-      out[i] = Math.max(0, vals[i] + (vals[i] - meanN) * k)
-    }
-  }
-  return out
+  return best
 }
 
 function syncScoreAt(bits, start){
@@ -1081,33 +1062,28 @@ function valsToPayload(vals){
   let bestBits = null
   let bestConf = null
 
-  // Try raw + unsharp strengths (blur amount varies with focus).
-  const variants = [vals]
-  for(const k of [0.15, 0.28, 0.4]) variants.push(deblurBitGrid(vals, k))
-
-  for(const v of variants){
-    for(const bb of bodies){
-      const L = SYNC.length + bb * 8
-      const cvals = collapseVals(v, L)
-      const r = thresholdVals(cvals)
-      if(r.sync > bestOk){
-        bestOk = r.sync
-        bestBits = r.bits
-        bestConf = r.conf
-        decodeDbg.mean = r.mean
-        decodeDbg.std = r.std
-      }
-      if(r.sync < 26) continue
-      triedLens++
-      const hit = decodeBodyText(r.bits.slice(SYNC.length), `fill@${L}(${r.sync}/32)`)
-      if(hit.text){
-        decodeDbg.sync = r.sync
-        decodeDbg.crc = "ok"
-        decodeDbg.last = `${hit.startLabel} ${hit.text.slice(0, 24)}…`
-        bitsFromVals._conf = r.conf
-        bitsFromVals._vals = cvals
-        return hit.text
-      }
+  // Try raw samples only (multi-unsharp chased false lengths on device).
+  for(const bb of bodies){
+    const L = SYNC.length + bb * 8
+    const cvals = collapseVals(vals, L)
+    const r = thresholdVals(cvals)
+    if(r.sync > bestOk){
+      bestOk = r.sync
+      bestBits = r.bits
+      bestConf = r.conf
+      decodeDbg.mean = r.mean
+      decodeDbg.std = r.std
+    }
+    if(r.sync < 26) continue
+    triedLens++
+    const hit = decodeBodyText(r.bits.slice(SYNC.length), `fill@${L}(${r.sync}/32)`)
+    if(hit.text){
+      decodeDbg.sync = r.sync
+      decodeDbg.crc = "ok"
+      decodeDbg.last = `${hit.startLabel} ${hit.text.slice(0, 24)}…`
+      bitsFromVals._conf = r.conf
+      bitsFromVals._vals = cvals
+      return hit.text
     }
   }
 
@@ -1186,7 +1162,7 @@ function sampleCloudBitsFromVideo(){
   const vw = video.videoWidth, vh = video.videoHeight
   if(!vw || !vh || !particleDirs) return null
   const scan = sampleCloudBitsFromVideo._c || (sampleCloudBitsFromVideo._c = document.createElement("canvas"))
-  const S = 640
+  const S = 512
   scan.width = S
   scan.height = S
   const c = scan.getContext("2d", { willReadFrequently: true })
@@ -1241,12 +1217,13 @@ function sampleCloudBitsFromVideo(){
 
   function sampleVals(){
     const vals = new Float32Array(DATA_COUNT)
+    const peakR = Math.max(2, Math.round(S / GRID_W * 0.28))
     for(let b = 0; b < DATA_COUNT; b++){
       let acc = 0
       for(let r = 0; r < BIT_REPS; r++){
         const i = b * BIT_REPS + r
         const p = bilinearInQuad(DATA_UV[i * 2], DATA_UV[i * 2 + 1], useQuad.tl, useQuad.tr, useQuad.br, useQuad.bl)
-        acc += sampleCenterInk(data, W, H, p.x, p.y)
+        acc += samplePeakAt(data, W, H, p.x, p.y, peakR)
       }
       vals[b] = acc / BIT_REPS
     }

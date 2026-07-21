@@ -28,30 +28,38 @@ export function crc32(bytes){
   return (c ^ 0xffffffff) >>> 0
 }
 
-/** Even stretch: each payload bit maps to a contiguous run of frame cells (no SYNC bias). */
+/** Front-loaded block-repeat (matched expand/collapse) — best SYNC lock on device. */
 export function expandBits(payload, n){
   const L = payload.length
   if(L <= 0) return "0".repeat(n)
   if(L >= n) return payload.slice(0, n)
-  const out = new Array(n)
+  const rep = (n / L) | 0
+  const extra = n - rep * L
+  let out = ""
   for(let i = 0; i < L; i++){
-    const a = Math.floor(i * n / L)
-    const b = Math.floor((i + 1) * n / L)
-    for(let j = a; j < b; j++) out[j] = payload[i]
+    const copies = rep + (i < extra ? 1 : 0)
+    out += payload[i].repeat(copies)
   }
-  return out.join("")
+  return out
 }
 
 export function collapseVals(vals, targetLen){
   const n = vals.length
   const L = targetLen
+  if(L >= n){
+    const out = new Float32Array(L)
+    out.set(vals.length >= L ? vals.subarray(0, L) : vals)
+    return out
+  }
+  const rep = (n / L) | 0
+  const extra = n - rep * L
   const out = new Float32Array(L)
+  let idx = 0
   for(let i = 0; i < L; i++){
-    const a = Math.floor(i * n / L)
-    const b = Math.max(a + 1, Math.floor((i + 1) * n / L))
+    const copies = rep + (i < extra ? 1 : 0)
     let s = 0
-    for(let j = a; j < b; j++) s += vals[j]
-    out[i] = s / (b - a)
+    for(let c = 0; c < copies; c++) s += vals[idx++]
+    out[i] = s / copies
   }
   return out
 }
@@ -186,23 +194,18 @@ export function valsToPayload(vals){
   let bestBits = null
   let bestConf = null
 
-  // Try raw + a few unsharp strengths (camera blur amount varies).
-  const variants = [vals, deblurBitGrid(vals, 0.15), deblurBitGrid(vals, 0.28), deblurBitGrid(vals, 0.4)]
-
-  for(const v of variants){
-    for(const bb of bodies){
-      const L = SYNC.length + bb * 8
-      const cvals = collapseVals(v, L)
-      const r = thresholdVals(cvals)
-      if(r.sync > bestSync){
-        bestSync = r.sync
-        bestBits = r.bits
-        bestConf = confOf(cvals, r.thr)
-      }
-      if(r.sync < 26) continue
-      const text = decodeBodyText(r.bits.slice(SYNC.length))
-      if(text) return { text, sync: r.sync, length: L }
+  for(const bb of bodies){
+    const L = SYNC.length + bb * 8
+    const cvals = collapseVals(vals, L)
+    const r = thresholdVals(cvals)
+    if(r.sync > bestSync){
+      bestSync = r.sync
+      bestBits = r.bits
+      bestConf = confOf(cvals, r.thr)
     }
+    if(r.sync < 26) continue
+    const text = decodeBodyText(r.bits.slice(SYNC.length))
+    if(text) return { text, sync: r.sync, length: L }
   }
 
   // Soft chase: flip ambiguous body bits near the threshold.
