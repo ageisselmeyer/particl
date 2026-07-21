@@ -8,12 +8,12 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>PartiCl</title>
-<link rel="stylesheet" href="styles.css?v=154630">
+<link rel="stylesheet" href="styles.css?v=154680">
 </head>
 <body>
   <header>
     <h1>PartiCl</h1>
-    <p class="tagline">Dot QR · MDS · <span id="buildId">154670</span></p>
+    <p class="tagline">Dot QR · MDS · <span id="buildId">154680</span></p>
   </header>
 
   <input type="file" id="fileInput" hidden>
@@ -95,7 +95,8 @@
   <script src="vendor/jsqr/jsQR.js"></script>
   <script src="vendor/zxing/zxing.min.js"></script>
   <script>
-    // Circular dot QR with classic square finder corners (three eyes stay put).
+    // Circular card + dot modules; TL/TR/BL finder corners stay classic squares.
+    // Extra quiet zone so finders fit inside the circular clip (no data crop).
     window.__particlPaintCloud = function(text){
       var c = document.getElementById("cloud");
       var wrap = document.getElementById("canvasWrap");
@@ -111,9 +112,10 @@
       qr.addData(String(text || "PartiCl"), "Byte");
       qr.make();
       var n = qr.getModuleCount();
-      var quiet = 4;
+      // Quiet must fit finder corners inside an inscribed circle: q >= n*(√2-1)/2
+      var quiet = Math.max(4, Math.ceil(n * 0.22));
       var W = 1024;
-      var cell = Math.floor(W / (n + quiet * 2));
+      var cell = Math.max(8, Math.floor(W / (n + quiet * 2)));
       var size = cell * (n + quiet * 2);
       c.hidden = false;
       c.style.display = "block";
@@ -127,41 +129,36 @@
       ctx.fillRect(0, 0, size, size);
 
       var origin = quiet * cell;
-      var mid = (n - 1) / 2;
-      // Disk clears the three 7×7 finder corners; slight overlap looks intentional
-      var diskR = mid - 2.6;
-      var diskR2 = diskR * diskR;
+      var field = n * cell;
+      var cx = size * 0.5;
+      var cy = size * 0.5;
+      var bodyR = field * 0.5 + cell * 0.25;
       var dotRad = cell * 0.48;
 
       function inPat(rr, cc){ return rr >= 0 && rr < 7 && cc >= 0 && cc < 7; }
       function isFinder(r, col){
         return inPat(r, col) || inPat(r, col - (n - 7)) || inPat(r - (n - 7), col);
       }
-      function inDisk(r, col){
-        var dr = r - mid, dc = col - mid;
-        return (dr * dr + dc * dc) <= diskR2;
-      }
 
-      // Soft circular guide (very light)
-      var cx = origin + (mid + 0.5) * cell;
-      var cy = origin + (mid + 0.5) * cell;
+      // Circular body wash
+      var bg = ctx.createRadialGradient(cx, cy, bodyR * 0.4, cx, cy, bodyR);
+      bg.addColorStop(0, "#ffffff");
+      bg.addColorStop(1, "#f2f2f2");
       ctx.beginPath();
-      ctx.arc(cx, cy, diskR * cell + cell * 0.35, 0, Math.PI * 2);
-      ctx.strokeStyle = "rgba(0,0,0,0.06)";
-      ctx.lineWidth = Math.max(1, cell * 0.08);
+      ctx.arc(cx, cy, bodyR, 0, Math.PI * 2);
+      ctx.fillStyle = bg;
+      ctx.fill();
+      ctx.strokeStyle = "rgba(0,0,0,0.1)";
+      ctx.lineWidth = Math.max(1, cell * 0.12);
       ctx.stroke();
 
       ctx.fillStyle = "#000000";
       for(var r = 0; r < n; r++){
         for(var col = 0; col < n; col++){
           if(!qr.isDark(r, col)) continue;
-          var finder = isFinder(r, col);
-          // Keep finders + timing (row/col 6); other modules only inside the circle
-          if(!finder && r !== 6 && col !== 6 && !inDisk(r, col)) continue;
-
           var x0 = origin + col * cell;
           var y0 = origin + r * cell;
-          if(finder){
+          if(isFinder(r, col)){
             ctx.fillRect(x0, y0, cell, cell);
           }else{
             ctx.beginPath();
@@ -176,6 +173,6 @@
     var st = document.getElementById("status");
     if(st) st.textContent = "Boot circular dot-QR · loading module…";
   </script>
-  <script type="module" src="app-qr.js?v=154670"></script>
+  <script type="module" src="app-qr.js?v=154680"></script>
 </body>
 </html>
