@@ -166,19 +166,24 @@ function b64ToBytes(b64){
   return out
 }
 
-function requireQrLib(){
-  if(typeof qrcode !== "function"){
-    throw new Error("qrcode-generator not loaded")
-  }
+function getQrCode(){
+  const fn = globalThis.qrcode
+  if(typeof fn !== "function") throw new Error("qrcode-generator not loaded")
+  return fn
+}
+
+function getJsQR(){
+  return typeof globalThis.jsQR === "function" ? globalThis.jsQR : null
 }
 
 function drawQrToCanvas(text){
-  requireQrLib()
+  const qrcode = getQrCode()
   const qr = qrcode(0, QR_ECC)
   qr.addData(text, "Byte")
   qr.make()
   const n = qr.getModuleCount()
   const canvas = qrCanvas
+  if(!canvas) throw new Error("qrCanvas missing")
   canvas.width = QR_PIXEL
   canvas.height = QR_PIXEL
   const ctx = canvas.getContext("2d")
@@ -282,7 +287,7 @@ function encodeFile(file){
       }
       frames = buildFrames(bytes, meta)
       // Sanity: ensure QR can encode the longest packet
-      requireQrLib()
+      const qrcode = getQrCode()
       const longest = frames.reduce((a, b) => (a.length >= b.length ? a : b), "")
       const probe = qrcode(0, QR_ECC)
       probe.addData(longest, "Byte")
@@ -615,7 +620,8 @@ async function scanQrFromVideo(){
   }
 
   // jsQR fallback
-  if(typeof jsQR === "function"){
+  const jsQR = getJsQR()
+  if(jsQR){
     const w = video.videoWidth
     const h = video.videoHeight
     const { sw, sh } = ensureScanCanvas(w, h)
@@ -628,7 +634,7 @@ async function scanQrFromVideo(){
     }
   }
 
-  decodeDbg.engine = detector ? "BarcodeDetector" : (typeof jsQR === "function" ? "jsQR" : "none")
+  decodeDbg.engine = detector ? "BarcodeDetector" : (getJsQR() ? "jsQR" : "none")
   return null
 }
 
@@ -762,7 +768,8 @@ qrCanvas.hidden = false
 canvasWrap.classList.add("tx-paper")
 try{
   drawQrToCanvas("PartiCl QR ready — Encode a file")
-}catch(_){
-  // libs may still be loading if scripts deferred oddly
+  setStatus("QR mode · Encode a file to stream QR frames — or Decode with the camera.")
+}catch(err){
+  console.error(err)
+  setStatus(`QR library failed to load: ${err.message || err}`)
 }
-setStatus("QR mode · Encode a file to stream QR frames — or Decode with the camera.")

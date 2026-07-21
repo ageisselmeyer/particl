@@ -2289,8 +2289,12 @@ var qrcode = function() {
 (function (factory) {
   if (typeof define === 'function' && define.amd) {
       define([], factory);
-  } else if (typeof exports === 'object') {
+  } else if (typeof exports === 'object' && typeof module !== 'undefined') {
       module.exports = factory();
+  } else {
+      var g = typeof globalThis !== 'undefined' ? globalThis
+        : (typeof window !== 'undefined' ? window : this);
+      g.qrcode = factory();
   }
 }(function () {
     return qrcode;
