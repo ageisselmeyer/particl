@@ -1,8 +1,10 @@
 /**
  * PartiCl QR transfer mode — MDS fountain (any k of n QRs recover).
  * Particle codec lives in app.js for later.
+ * RS is loaded dynamically so a failed import cannot blank the boot cloud.
  */
-import { rsEncode, rsDecodeErasures } from "./rs.js"
+let rsEncode = null
+let rsDecodeErasures = null
 
 const canvasWrap = document.getElementById("canvasWrap")
 const cloudCanvas = document.getElementById("cloud")
@@ -403,6 +405,14 @@ function paintParticleCloud(now){
 }
 
 function drawQrToCanvas(text){
+  // Prefer classic painter (proven on device). Never use white createDataURL.
+  if(typeof window.__particlPaintCloud === "function"){
+    const ok = window.__particlPaintCloud(text)
+    if(ok){
+      try{ spawnCloudFromText(text) }catch(_){}
+      return
+    }
+  }
   spawnCloudFromText(text)
   paintParticleCloud(performance.now())
 }
@@ -434,8 +444,16 @@ function planCoding(fileLen){
   return { k, n, sym, nsym: n - k }
 }
 
+async function ensureRs(){
+  if(typeof rsEncode === "function" && typeof rsDecodeErasures === "function") return
+  const mod = await import("./rs.js")
+  rsEncode = mod.rsEncode
+  rsDecodeErasures = mod.rsDecodeErasures
+}
+
 /** Per-byte-column RS: n packets, any k recover the k source blocks. */
 function encodeRsPackets(sources, n){
+  if(typeof rsEncode !== "function") throw new Error("Reed-Solomon not loaded yet")
   const k = sources.length
   const nsym = n - k
   const symLen = sources[0].length
@@ -450,6 +468,7 @@ function encodeRsPackets(sources, n){
 }
 
 function decodeRsPackets(symbolMap, k, n, symLen){
+  if(typeof rsDecodeErasures !== "function") throw new Error("Reed-Solomon not loaded yet")
   if(symbolMap.size < k) return null
   const nsym = n - k
   const erase = []
@@ -520,8 +539,9 @@ function buildFrames(fileBytes, fileMeta){
 
 function encodeFile(file){
   const reader = new FileReader()
-  reader.onload = () => {
+  reader.onload = async () => {
     try{
+      await ensureRs()
       const bytes = new Uint8Array(reader.result)
       meta = {
         name: file.name || "recovered_file",
@@ -547,7 +567,6 @@ function encodeFile(file){
       const loop = (now) => {
         if(run !== txRun) return
         tickTx(now)
-        paintParticleCloud(now)
         txRaf = requestAnimationFrame(loop)
       }
       txRaf = requestAnimationFrame(loop)
@@ -569,11 +588,15 @@ function tickTx(now){
   if(!frames.length) return
   if(!phaseStartedAt) phaseStartedAt = now
   let elapsed = now - phaseStartedAt
+  let changed = false
   while(elapsed >= FRAME_HOLD_MS){
     elapsed -= FRAME_HOLD_MS
     phaseStartedAt += FRAME_HOLD_MS
     frameIndex = (frameIndex + 1) % frames.length
-    spawnCloudFromText(frames[frameIndex])
+    changed = true
+  }
+  if(changed){
+    drawQrToCanvas(frames[frameIndex])
   }
   if((tickTx._lastStatus | 0) !== frameIndex){
     tickTx._lastStatus = frameIndex
@@ -886,6 +909,10 @@ async function scanQrFromVideo(){
 }
 
 async function startDecoder(){
+  try{ await ensureRs() }catch(e){
+    setStatus(`RS load failed: ${e.message || e}`)
+    return
+  }
   txRun = 0
   frames = []
   if(txRaf) cancelAnimationFrame(txRaf)
@@ -1010,48 +1037,21 @@ async function decodeLoop(){
   }
 }
 
-// Boot — idle particle QR cloud
+// Boot — keep the classic blue-on-black cloud (do not overwrite with washed particle RAF)
 function bootQr(){
   try{
     showQrUi()
     if(typeof (globalThis.qrcode || window.qrcode) !== "function"){
       throw new Error("vendor/qrcode/qrcode.js did not expose window.qrcode")
     }
-    // Ensure we can get a context before clearing/painting
-    const ctx = ensureCloudCanvas()
-    ctx.fillStyle = "#000"
-    ctx.fillRect(0, 0, CLOUD_PIXEL, CLOUD_PIXEL)
-
     drawQrToCanvas("PartiCl QR ready - Encode a file")
-    const idle = (now) => {
-      if(frames.length) return
-      try{ paintParticleCloud(now) }catch(e){ console.error(e); return }
-      requestAnimationFrame(idle)
-    }
-    requestAnimationFrame(idle)
+    ensureRs().catch((e) => console.warn("RS preload failed", e))
     setStatus("Particle QR · Encode a file — or Decode with the camera.")
   }catch(err){
     console.error(err)
     setStatus(`Cloud failed: ${err.message || err}`)
-    // Last resort: crisp QR img so the box is never empty white
-    try{
-      const qr = getQrCode()(0, QR_ECC)
-      qr.addData("PartiCl fallback", "Byte")
-      qr.make()
-      if(qrImg){
-        qrImg.hidden = false
-        qrImg.style.display = "block"
-        qrImg.style.position = "absolute"
-        qrImg.style.inset = "0"
-        qrImg.style.width = "100%"
-        qrImg.style.height = "100%"
-        qrImg.style.objectFit = "contain"
-        qrImg.style.background = "#000"
-        qrImg.src = qr.createDataURL(8, 6)
-        if(cloudCanvas) cloudCanvas.style.opacity = "0"
-      }
-    }catch(e2){
-      console.error(e2)
+    if(typeof window.__particlPaintCloud === "function"){
+      window.__particlPaintCloud("PartiCl fallback")
     }
   }
 }

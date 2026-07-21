@@ -8,12 +8,12 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>PartiCl</title>
-<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="styles.css?v=154630">
 </head>
 <body>
   <header>
     <h1>PartiCl</h1>
-    <p class="tagline">Particle QR · MDS · <span id="buildId">154620</span></p>
+    <p class="tagline">Particle QR · MDS · <span id="buildId">154630</span></p>
   </header>
 
   <input type="file" id="fileInput" hidden>
@@ -94,17 +94,61 @@
   <script src="vendor/qrcode/qrcode.js"></script>
   <script src="vendor/jsqr/jsQR.js"></script>
   <script>
-    // Paint black immediately so an empty canvas never flashes white before the module loads.
-    (function(){
+    // Classic boot paint — does NOT depend on the ES module. Blue modules on black.
+    // Never use createDataURL here (that API paints a white paper QR).
+    window.__particlPaintCloud = function(text){
       var c = document.getElementById("cloud");
-      if(!c) return;
-      c.width = 1024; c.height = 1024;
+      var wrap = document.getElementById("canvasWrap");
+      var img = document.getElementById("qrImg");
+      if(img){ img.hidden = true; img.removeAttribute("src"); img.style.display = "none"; }
+      if(wrap){
+        wrap.classList.remove("tx-paper");
+        wrap.classList.add("tx-cloud");
+        wrap.style.background = "#000";
+      }
+      if(!c || typeof qrcode !== "function") return false;
+      var qr = qrcode(0, "M");
+      qr.addData(String(text || "PartiCl"), "Byte");
+      qr.make();
+      var n = qr.getModuleCount();
+      var W = 1024;
+      c.hidden = false;
+      c.style.display = "block";
+      c.style.opacity = "1";
+      c.style.background = "#000";
+      c.width = W;
+      c.height = W;
       var ctx = c.getContext("2d");
-      if(!ctx) return;
-      ctx.fillStyle = "#000";
-      ctx.fillRect(0, 0, 1024, 1024);
-    })();
+      if(!ctx) return false;
+      ctx.globalCompositeOperation = "source-over";
+      ctx.fillStyle = "#000000";
+      ctx.fillRect(0, 0, W, W);
+      var margin = 0.12;
+      var field = W * (1 - 2 * margin);
+      var cell = field / n;
+      var origin = W * margin;
+      for(var r = 0; r < n; r++){
+        for(var col = 0; col < n; col++){
+          if(!qr.isDark(r, col)) continue;
+          var x = origin + (col + 0.5) * cell;
+          var y = origin + (r + 0.5) * cell;
+          var rad = cell * 0.32;
+          var g = ctx.createRadialGradient(x, y, 0, x, y, rad);
+          g.addColorStop(0, "rgba(120,200,255,0.95)");
+          g.addColorStop(0.55, "rgba(20,120,255,0.75)");
+          g.addColorStop(1, "rgba(0,0,0,0)");
+          ctx.fillStyle = g;
+          ctx.beginPath();
+          ctx.arc(x, y, rad, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+      return true;
+    };
+    window.__particlPaintCloud("PartiCl QR ready - Encode a file");
+    var st = document.getElementById("status");
+    if(st) st.textContent = "Boot cloud painted · loading module…";
   </script>
-  <script type="module" src="app-qr.js?v=154620"></script>
+  <script type="module" src="app-qr.js?v=154630"></script>
 </body>
 </html>
