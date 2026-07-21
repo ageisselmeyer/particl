@@ -130,6 +130,41 @@ export function decodeBodyText(bodyBits){
   return null
 }
 
+/** Simulate camera blur by mixing each cell with its 4-neighbors. */
+export function blurBitGrid(vals, mix = 0.35){
+  const out = new Float32Array(DATA_COUNT)
+  for(let gy = 0; gy < GRID_H; gy++){
+    for(let gx = 0; gx < GRID_W; gx++){
+      const i = gy * GRID_W + gx
+      let neigh = 0, n = 0
+      if(gx > 0){ neigh += vals[i - 1]; n++ }
+      if(gx < GRID_W - 1){ neigh += vals[i + 1]; n++ }
+      if(gy > 0){ neigh += vals[i - GRID_W]; n++ }
+      if(gy < GRID_H - 1){ neigh += vals[i + GRID_W]; n++ }
+      const meanN = n ? neigh / n : vals[i]
+      out[i] = vals[i] * (1 - mix) + meanN * mix
+    }
+  }
+  return out
+}
+
+export function deblurBitGrid(vals, k = 0.22){
+  const out = new Float32Array(DATA_COUNT)
+  for(let gy = 0; gy < GRID_H; gy++){
+    for(let gx = 0; gx < GRID_W; gx++){
+      const i = gy * GRID_W + gx
+      let neigh = 0, n = 0
+      if(gx > 0){ neigh += vals[i - 1]; n++ }
+      if(gx < GRID_W - 1){ neigh += vals[i + 1]; n++ }
+      if(gy > 0){ neigh += vals[i - GRID_W]; n++ }
+      if(gy < GRID_H - 1){ neigh += vals[i + GRID_W]; n++ }
+      const meanN = n ? neigh / n : vals[i]
+      out[i] = Math.max(0, vals[i] + (vals[i] - meanN) * k)
+    }
+  }
+  return out
+}
+
 /** Recover payload from full-grid ink samples (higher = darker = bit 1). */
 export function valsToPayload(vals){
   const maxBody = Math.min(520, ((vals.length - SYNC.length) / 8) | 0)
@@ -140,9 +175,6 @@ export function valsToPayload(vals){
     const db = Math.min(Math.abs(b - 47), Math.abs(b - 82))
     return da - db || a - b
   })
-  let bestSync = 0
-  let bestBits = null
-  let bestConf = null
 
   const confOf = (cvals, thr) => {
     const conf = new Float32Array(cvals.length)
@@ -150,18 +182,27 @@ export function valsToPayload(vals){
     return conf
   }
 
-  for(const bb of bodies){
-    const L = SYNC.length + bb * 8
-    const cvals = collapseVals(vals, L)
-    const r = thresholdVals(cvals)
-    if(r.sync > bestSync){
-      bestSync = r.sync
-      bestBits = r.bits
-      bestConf = confOf(cvals, r.thr)
+  let bestSync = 0
+  let bestBits = null
+  let bestConf = null
+
+  // Try raw + a few unsharp strengths (camera blur amount varies).
+  const variants = [vals, deblurBitGrid(vals, 0.15), deblurBitGrid(vals, 0.28), deblurBitGrid(vals, 0.4)]
+
+  for(const v of variants){
+    for(const bb of bodies){
+      const L = SYNC.length + bb * 8
+      const cvals = collapseVals(v, L)
+      const r = thresholdVals(cvals)
+      if(r.sync > bestSync){
+        bestSync = r.sync
+        bestBits = r.bits
+        bestConf = confOf(cvals, r.thr)
+      }
+      if(r.sync < 26) continue
+      const text = decodeBodyText(r.bits.slice(SYNC.length))
+      if(text) return { text, sync: r.sync, length: L }
     }
-    if(r.sync < 26) continue
-    const text = decodeBodyText(r.bits.slice(SYNC.length))
-    if(text) return { text, sync: r.sync, length: L }
   }
 
   // Soft chase: flip ambiguous body bits near the threshold.

@@ -9,7 +9,8 @@
 import {
   DATA_COUNT, SYNC, SYMBOL_SIZE,
   expandBits, collapseVals, thresholdVals,
-  wrapPayload, valsToPayload, bitsToInkVals
+  wrapPayload, valsToPayload, bitsToInkVals,
+  blurBitGrid, deblurBitGrid
 } from "../protocol.js"
 
 function assert(cond, msg){
@@ -108,7 +109,31 @@ console.log("1) Clean roundtrips (hard gate):")
 runCase("PC6 clean", () => roundtrip("PC6", makePc6(false)))
 runCase("PC6M clean", () => roundtrip("PC6M", makePc6(true)))
 
-console.log("\n2) Seeded noisy roundtrips:")
+console.log("\n3) Blur robustness (neighbor bleed):")
+for(const mix of [0.25, 0.4]){
+  runCase(`PC6 blur=${mix}`, () => {
+    const text = makePc6(false)
+    const vals = blurBitGrid(bitsToInkVals(expandBits(wrapPayload(text), DATA_COUNT)), mix)
+    const recovered = valsToPayload(vals)
+    assert(recovered.text === text, `sync=${recovered.sync}`)
+    return { mix }
+  })
+  runCase(`PC6M blur=${mix}`, () => {
+    const text = makePc6(true)
+    const vals = blurBitGrid(bitsToInkVals(expandBits(wrapPayload(text), DATA_COUNT)), mix)
+    const recovered = valsToPayload(vals)
+    assert(recovered.text === text, `sync=${recovered.sync}`)
+    return { mix }
+  })
+}
+runCase("PC6 blur=0.55", () => {
+  const text = makePc6(false)
+  const vals = blurBitGrid(bitsToInkVals(expandBits(wrapPayload(text), DATA_COUNT)), 0.55)
+  const recovered = valsToPayload(vals)
+  assert(recovered.text === text, `sync=${recovered.sync}`)
+})
+
+console.log("\n4) Seeded noisy roundtrips:")
 const noisy = [
   ["PC6", false, 0, 3, 1],
   ["PC6", false, 25, 3, 2],
@@ -122,7 +147,7 @@ for(const [label, meta, noise, frames, seed] of noisy){
   })
 }
 
-console.log("\n3) Old front-loaded stretch still fails under tail noise (expected):")
+console.log("\n5) Old front-loaded stretch still fails under tail noise (expected):")
 {
   const logical = wrapPayload(makePc6(false))
   const frame = copyBiasExpand(logical, DATA_COUNT)
