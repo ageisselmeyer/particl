@@ -50,7 +50,7 @@ function setStatus(msg){
 const TARGET_K = 10
 const TARGET_N = 20
 const MAX_SYMBOL_BYTES = 220
-const FRAME_HOLD_MS = 1500
+const FRAME_HOLD_MS = 750
 const QR_ECC = "Q"
 const QR_CELL = 10
 const QR_MARGIN = 8
@@ -626,31 +626,19 @@ function buildFrames(fileBytes, fileMeta){
   const out = []
   for(let pi = 0; pi < order.length; pi++){
     const seq = order[pi]
-    const includeMeta = pi === 0 || pi === order.length - 1
+    // Meta (incl. filename) on every frame so download name survives missed packets
     const dataB64 = bytesToB64(packetData[seq])
-    let payload
-    if(includeMeta){
-      payload = [
-        "PC7M",
-        fileId,
-        String(k),
-        String(n),
-        String(fileMeta.size >>> 0),
-        utf8ToB64(fileMeta.name || "file"),
-        utf8ToB64(fileMeta.type || "application/octet-stream"),
-        String(seq),
-        dataB64
-      ].join("|")
-    }else{
-      payload = [
-        "PC7",
-        fileId,
-        String(k),
-        String(n),
-        String(seq),
-        dataB64
-      ].join("|")
-    }
+    const payload = [
+      "PC7M",
+      fileId,
+      String(k),
+      String(n),
+      String(fileMeta.size >>> 0),
+      utf8ToB64(fileMeta.name || "file"),
+      utf8ToB64(fileMeta.type || "application/octet-stream"),
+      String(seq),
+      dataB64
+    ].join("|")
     out.push(payload)
   }
   out._fountain = { k, n, r: n - k, sym, total: n, need: k }
@@ -885,7 +873,11 @@ function ingestPayloadText(text){
     const seq = parseInt(parts[7], 10)
     const data = b64ToBytes(parts.slice(8).join("|"))
     if(!ingestMdsSymbol(fileId, k, n, seq, data)) return false
-    rxMeta = { name, type, size }
+    rxMeta = {
+      name: (name && name.trim()) ? name.trim() : (rxMeta?.name || "recovered_file"),
+      type: (type && type.trim()) ? type.trim() : (rxMeta?.type || "application/octet-stream"),
+      size: Number.isFinite(size) ? size : (rxMeta?.size ?? null)
+    }
     return true
   }
   if(text.startsWith("PC7|")){
