@@ -44,10 +44,11 @@ function setStatus(msg){
 
 // Larger symbols than the particle path — QR carries more payload per frame.
 const SYMBOL_SIZE = 96
-const FRAME_HOLD_MS = 1400
-const FOUNTAIN_SOURCE_COPIES = 2
-const FOUNTAIN_REPAIR_BASE = 0.4
-const QR_ECC = "M" // L/M/Q/H — M is a good phone default
+const FRAME_HOLD_MS = 1200
+// Fountain: 1 systematic pass + repair so any ~k unique QRs can finish (misses OK).
+const FOUNTAIN_SOURCE_COPIES = 1
+const FOUNTAIN_REPAIR_BASE = 1.0 // as many repair as source → tolerate ~40–50% misses
+const QR_ECC = "M"
 const QR_PIXEL = 1024
 
 let frames = [] // string payloads
@@ -65,34 +66,16 @@ function fountainRng(seed){
   }
 }
 
-function pickLtDegree(k, rnd){
-  const u = rnd()
-  if(u < 1 / k) return 1
-  let d = 2
-  let cum = 1 / k
-  while(d < k){
-    cum += 1 / (d * (d - 1))
-    if(u < cum) return d
-    d++
-  }
-  return Math.min(k, 2 + ((rnd() * Math.min(k, 8)) | 0))
-}
-
-function ltIndices(k, seed){
-  const rnd = fountainRng(seed)
-  const d = Math.min(k, Math.max(1, pickLtDegree(k, rnd)))
-  const set = new Set()
-  let guard = 0
-  while(set.size < d && guard++ < k * 8) set.add((rnd() * k) | 0)
-  if(!set.size) set.add(0)
-  return [...set]
-}
-
 function xorBytes(into, from){
   const n = Math.min(into.length, from.length)
   for(let i = 0; i < n; i++) into[i] ^= from[i]
 }
 
+/**
+ * Decode fountain symbols → k source blocks.
+ * Tries fast peel first, then GF(2) Gaussian elimination on the coefficient matrix
+ * (works whenever received packets span the k sources — misses OK).
+ */
 function ltDecodePeel(k, symbolMap){
   const eqs = []
   for(const sym of symbolMap.values()){
@@ -111,9 +94,6 @@ function ltDecodePeel(k, symbolMap){
         }
       }
       if(eq.indices.size === 0){
-        let ok = true
-        for(let i = 0; i < eq.data.length; i++) if(eq.data[i]){ ok = false; break }
-        if(!ok) return null
         eqs.splice(e, 1)
         continue
       }
@@ -125,8 +105,85 @@ function ltDecodePeel(k, symbolMap){
       }
     }
   }
-  for(let i = 0; i < k; i++) if(!known[i]) return null
+  if(known.every(Boolean)) return known
+  return ltDecodeGE(k, symbolMap)
+}
+
+/** Dense GF(2) Gauss–Jordan on packet coefficients; RHS is SYMBOL_SIZE-byte XOR vectors. */
+function ltDecodeGE(k, symbolMap){
+  const rows = []
+  for(const sym of symbolMap.values()){
+    const coef = new Uint8Array(k)
+    for(const i of sym.indices) if(i >= 0 && i < k) coef[i] = 1
+    // Skip empty equations
+    let any = false
+    for(let i = 0; i < k; i++) if(coef[i]){ any = true; break }
+    if(!any) continue
+    rows.push({ coef, data: sym.data.slice() })
+  }
+  if(rows.length < k) return null
+
+  const pivotForCol = new Int32Array(k).fill(-1)
+  let row = 0
+  for(let col = 0; col < k; col++){
+    let piv = -1
+    for(let i = row; i < rows.length; i++){
+      if(rows[i].coef[col]){ piv = i; break }
+    }
+    if(piv < 0) continue
+    if(piv !== row){
+      const tmp = rows[row]
+      rows[row] = rows[piv]
+      rows[piv] = tmp
+    }
+    // Eliminate this column from every other row (RREF-style)
+    for(let i = 0; i < rows.length; i++){
+      if(i === row || !rows[i].coef[col]) continue
+      for(let c = 0; c < k; c++) rows[i].coef[c] ^= rows[row].coef[c]
+      xorBytes(rows[i].data, rows[row].data)
+    }
+    pivotForCol[col] = row
+    row++
+    if(row >= rows.length) break
+  }
+
+  const known = new Array(k).fill(null)
+  for(let col = 0; col < k; col++){
+    const pr = pivotForCol[col]
+    if(pr < 0) return null
+    // After RREF, pivot row should be e_col; still clear any higher 1s via knowns
+    const data = rows[pr].data.slice()
+    for(let c = 0; c < k; c++){
+      if(c === col) continue
+      if(rows[pr].coef[c]){
+        if(!known[c]) return null
+        xorBytes(data, known[c])
+      }
+    }
+    known[col] = data
+  }
   return known
+}
+
+/** Ideal+robust-ish degree: bias toward degree 1–3 for peelability, with some higher. */
+function pickLtDegree(k, rnd){
+  if(k <= 1) return 1
+  const u = rnd()
+  // ~40% degree-1 (systematic-like repair), ~30% deg 2, ~20% deg 3, rest up to min(k,8)
+  if(u < 0.4) return 1
+  if(u < 0.7) return 2
+  if(u < 0.9) return Math.min(k, 3)
+  return Math.min(k, 2 + ((rnd() * Math.min(k - 1, 6)) | 0))
+}
+
+function ltIndices(k, seed){
+  const rnd = fountainRng(seed)
+  const d = Math.min(k, Math.max(1, pickLtDegree(k, rnd)))
+  const set = new Set()
+  let guard = 0
+  while(set.size < d && guard++ < k * 8) set.add((rnd() * k) | 0)
+  if(!set.size) set.add(0)
+  return [...set]
 }
 
 function fileIdSeed(fileId, j){
@@ -300,7 +357,8 @@ function encodeFile(file){
       txRaf = requestAnimationFrame(loop)
       const ft = frames._fountain || {}
       setStatus(
-        `QR mode · “${meta.name}” · ${frames.length} frames (k=${ft.k}) · point camera here`
+        `Fountain QR · “${meta.name}” · ${frames.length} frames ` +
+        `(need any ~${ft.k} unique of ${ft.k}+${ft.r}) · point camera here`
       )
     }catch(err){
       console.error(err)
@@ -404,8 +462,12 @@ function updateDecodeMeters(){
   let crcScore = 0
   let crcLabel = "waiting"
   if(rxRecovered || rxPayloadOk){
-    crcScore = rxRecovered ? 100 : Math.min(95, Math.round((rxSymbols.size / Math.max(1, rxK || 1)) * 95))
-    crcLabel = rxRecovered ? "recovered" : `${rxSymbols.size}/${rxK || "?"} symbols`
+    const need = Math.max(1, rxK || 1)
+    const have = Math.max(countUniqueSources(), Math.min(rxSymbols.size, need))
+    crcScore = rxRecovered ? 100 : Math.min(95, Math.round((have / need) * 95))
+    crcLabel = rxRecovered
+      ? "recovered"
+      : `fountain ${rxSymbols.size} unique · need ~${rxK}`
   }
   decodeQuality.crcScore = crcScore
   if(crcScore > decodeQuality.crcPeak) decodeQuality.crcPeak = crcScore
@@ -422,7 +484,7 @@ function updateDecodeDebug(){
   decodeDebugEl.textContent = [
     `frame ${decodeFrameNo} · ${decodeDbg.video} · ~${decodeDbg.fps} fps`,
     `engine ${decodeDbg.engine} · hits ${decodeDbg.hits} · streak ${qrHitStreak}`,
-    `fountain ok=${rxDecodeCount} unique=${rxSymbols.size} sources=${countUniqueSources()}/${rxK ?? "?"}`,
+    `fountain unique=${rxSymbols.size} sources=${countUniqueSources()}/${rxK ?? "?"} · scans=${rxDecodeCount}`,
     `last: ${decodeDbg.last}`
   ].join("\n")
 }
@@ -503,18 +565,11 @@ function countUniqueSources(){
   return n
 }
 
-function fountainDecodeReady(){
-  if(!rxFountain || rxK == null) return false
-  if(countUniqueSources() >= rxK) return true
-  const sent = rxK * FOUNTAIN_SOURCE_COPIES + (rxR || 0)
-  if(rxDecodeCount < Math.ceil(sent * 0.75)) return false
-  return rxSymbols.size >= rxK
-}
-
-function tryFinishFountain(){
-  if(!fountainDecodeReady()) return false
+/** Try LT peel whenever we have enough distinct packets — do not wait for every TX frame. */
+function tryPeelSources(){
+  if(!rxFountain || rxK == null) return null
   const k = rxK
-  let sources = null
+  // Direct: collected every source symbol
   let haveAllDirect = true
   const direct = new Array(k)
   for(let i = 0; i < k; i++){
@@ -522,11 +577,15 @@ function tryFinishFountain(){
     if(s) direct[i] = s.data
     else haveAllDirect = false
   }
-  if(haveAllDirect) sources = direct
-  else{
-    sources = ltDecodePeel(k, rxSymbols)
-    if(!sources) return false
-  }
+  if(haveAllDirect) return direct
+  // Need about k independent equations; try from ~0.9k unique packets upward
+  if(rxSymbols.size < Math.ceil(k * 0.9)) return null
+  return ltDecodePeel(k, rxSymbols)
+}
+
+function tryFinishFountain(){
+  const sources = tryPeelSources()
+  if(!sources) return false
   if(!rxMeta) rxMeta = { name: "recovered_file", type: "application/octet-stream", size: null }
   const merged = new Uint8Array(rxK * SYMBOL_SIZE)
   for(let i = 0; i < rxK; i++) merged.set(sources[i], i * SYMBOL_SIZE)
@@ -538,7 +597,13 @@ function tryFinishFountain(){
   downloadLink.hidden = false
   progressBar.style.width = "100%"
   progressText.textContent = "Done"
-  setStatus(`Recovered “${downloadLink.download}” (${finalBytes.length} bytes) · ${rxDecodeCount} QR hits.`)
+  const skipped = Math.max(0, (rxK + (rxR || 0)) - rxSymbols.size)
+  setStatus(
+    `Recovered “${downloadLink.download}” (${finalBytes.length} bytes) · ` +
+    `${rxSymbols.size} unique QRs` +
+    (skipped > 0 ? ` · skipped ~${skipped} frames` : "") +
+    ` · ${rxDecodeCount} scans`
+  )
   try{ downloadLink.click() }catch(_){}
   rxRecovered = true
   updateDecodeMeters()
@@ -711,11 +776,12 @@ async function decodeLoop(){
   decodeDbgLastT = now
   if(video.videoWidth) decodeDbg.video = `${video.videoWidth}x${video.videoHeight}`
 
-  const need = rxK != null ? `${countUniqueSources()}/${rxK} sources` : "?"
-  progressText.textContent = `QR hits: ${rxDecodeCount} · ${need}`
+  const need = rxK != null
+    ? `${rxSymbols.size} unique · need ~${rxK} (sources ${countUniqueSources()}/${rxK})`
+    : "waiting for first QR"
+  progressText.textContent = need
   if(rxFountain && rxK){
-    const sent = rxK * FOUNTAIN_SOURCE_COPIES + (rxR || 0)
-    const pct = Math.min(100, Math.floor((rxDecodeCount / Math.ceil(sent * 0.8)) * 100))
+    const pct = Math.min(99, Math.floor((Math.min(rxSymbols.size, rxK) / rxK) * 100))
     progressBar.style.width = pct + "%"
   }
 
@@ -729,12 +795,16 @@ async function decodeLoop(){
       lastQrText = text
       if(ingestPayloadText(text)){
         rxPayloadOk = true
-        setStatus(`QR locked · ${rxSymbols.size} symbols · peeling…`)
+        setStatus(
+          `Fountain ${rxSymbols.size}/~${rxK} unique` +
+          ` · sources ${countUniqueSources()}/${rxK}` +
+          ` · misses OK`
+        )
         if(tryFinish()) return
       }else{
         decodeDbg.last = `ignored: ${text.slice(0, 40)}`
       }
-    }else if(rxFountain && rxSymbols.size >= (rxK || 0)){
+    }else if(rxFountain && rxSymbols.size >= Math.ceil((rxK || 1) * 0.9)){
       if(tryFinish()) return
     }
   }else{
