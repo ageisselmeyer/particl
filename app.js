@@ -45,9 +45,12 @@ function setStatus(msg){
 
 // --- Protocol ---
 const PARTICLE_COUNT = 22000
-const DATA_COUNT = 4096 // bits per frame — front-hemisphere particles only
-const FRAME_HOLD_MS = 900
+const BIT_REPS = 3 // each logical bit painted on 3 front particles (majority vote)
+const DATA_COUNT = 2048 // logical bits per frame
+const PHYS_COUNT = DATA_COUNT * BIT_REPS
+const FRAME_HOLD_MS = 1100
 const FRAME_BLEND_MS = 0
+const SYMBOL_SIZE = 64
 
 // Corner brackets on TX match these normalized positions (center of L-mark).
 const ALIGN_MARKER_UV = 0.075
@@ -55,8 +58,7 @@ const SAMPLE_INSET = 0.11
 
 const SYNC = "11001100111100001010101011001100" // 32-bit
 
-// Fountain (LT-style): k source symbols + ~25% repair → recover from ~80% of sent frames.
-const SYMBOL_SIZE = 136
+// Fountain (LT-style): k source symbols + repair → recover from ~80% of sent frames.
 const FOUNTAIN_SOURCE_COPIES = 2
 const FOUNTAIN_REPAIR_BASE = 0.4
 
@@ -184,6 +186,7 @@ const PARTICLE_DIRS = fibonacciSphere(PARTICLE_COUNT)
 let particleDirs = PARTICLE_DIRS
 
 // Data on camera-facing particles only (z toward +Z). Back-hemisphere bits are invisible.
+// Groups of BIT_REPS particles share one logical bit (majority vote on decode).
 const DATA_INDICES = (() => {
   const front = []
   for(let i = 0; i < PARTICLE_COUNT; i++){
@@ -193,14 +196,14 @@ const DATA_INDICES = (() => {
     const j = Math.floor(hash01(i, 42) * (i + 1))
     const t = front[i]; front[i] = front[j]; front[j] = t
   }
-  if(front.length < DATA_COUNT){
-    throw new Error(`Need ${DATA_COUNT} front particles, got ${front.length}`)
+  if(front.length < PHYS_COUNT){
+    throw new Error(`Need ${PHYS_COUNT} front particles, got ${front.length}`)
   }
-  return Int32Array.from(front.slice(0, DATA_COUNT))
+  return Int32Array.from(front.slice(0, PHYS_COUNT))
 })()
 const IS_DATA = (() => {
   const m = new Uint8Array(PARTICLE_COUNT)
-  for(let i = 0; i < DATA_COUNT; i++) m[DATA_INDICES[i]] = 1
+  for(let i = 0; i < PHYS_COUNT; i++) m[DATA_INDICES[i]] = 1
   return m
 })()
 
@@ -445,16 +448,18 @@ function onResize(){
 }
 
 function setSignalBits(bitStr, snap){
-  // Decorative ambient first, then stamp data bits onto Sobol-scattered indices
+  // Decorative ambient first, then stamp data bits onto front carriers.
   for(let i = 0; i < PARTICLE_COUNT; i++){
     if(IS_DATA[i]) continue
     const twinkle = 0.5 + 0.5 * Math.sin(hash01(i, 11) * 6.283 + performance.now() * 0.00045)
     signalTarget[i] = txRun ? 0.02 : (0.05 + 0.16 * twinkle)
   }
   for(let b = 0; b < DATA_COUNT; b++){
-    const pi = DATA_INDICES[b]
-    // High contrast for optical decode (avoid mid-gray bleed from bloom).
-    signalTarget[pi] = bitStr[b] === "1" ? 1 : 0.0
+    const on = bitStr[b] === "1" ? 1 : 0.0
+    const base = b * BIT_REPS
+    for(let r = 0; r < BIT_REPS; r++){
+      signalTarget[DATA_INDICES[base + r]] = on
+    }
   }
   if(snap && signalAttr){
     const arr = signalAttr.array
@@ -862,24 +867,28 @@ function bitsFromVals(vals){
   decodeDbg.mean = mean
   decodeDbg.std = std
 
-  // Sweep thresholds; pick the one that best matches SYNC at bit 0 (true frame layout).
   let bestBits = null
   let bestScore = -1
   let bestThr = mean
+  let bestConf = null
   const lo = mean - std * 1.2
   const hi = mean + std * 1.2
   for(let s = 0; s < 17; s++){
     const thr = lo + (hi - lo) * (s / 16)
     let bits = ""
-    for(let i = 0; i < DATA_COUNT; i++) bits += vals[i] > thr ? "1" : "0"
+    const conf = new Float32Array(DATA_COUNT)
+    for(let i = 0; i < DATA_COUNT; i++){
+      bits += vals[i] > thr ? "1" : "0"
+      conf[i] = Math.abs(vals[i] - thr)
+    }
     const score = syncScoreAt(bits, 0)
     if(score > bestScore){
       bestScore = score
       bestBits = bits
       bestThr = thr
+      bestConf = conf
     }
   }
-  // Also try a couple of 1-bit slips (sample phase).
   if(bestScore < 30 && bestBits){
     for(const slip of [1, 2, 3]){
       const shifted = "0".repeat(slip) + bestBits.slice(0, DATA_COUNT - slip)
@@ -892,6 +901,9 @@ function bitsFromVals(vals){
   }
   decodeDbg.sync = bestScore
   decodeDbg.last = `thr ${bestThr.toFixed(1)} · SYNC0 ${bestScore}/32`
+  bitsFromVals._thr = bestThr
+  bitsFromVals._conf = bestConf
+  bitsFromVals._vals = vals
   return bestBits
 }
 
@@ -986,51 +998,72 @@ function sampleCloudBitsFromVideo(){
   decodeDbg.accum = decodeBitFrames
 
   const inset = SAMPLE_INSET
-  const fov0 = 38 * Math.PI / 180
   const camY = CAMERA_BASE.y
   const camZ = CAMERA_BASE.z
+
+  function sampleOne(pi, shellR, f){
+    const x = particleDirs[pi * 3] * shellR
+    const y = particleDirs[pi * 3 + 1] * shellR
+    const z = particleDirs[pi * 3 + 2] * shellR
+    const ey = y - camY
+    const ez = z - camZ
+    const invZ = 1 / Math.max(0.35, -ez)
+    const ndcX = f * x * invZ
+    const ndcY = f * ey * invZ
+    let u = ndcX * 0.5 + 0.5
+    let v = -ndcY * 0.5 + 0.5
+    u = inset + u * (1 - inset * 2)
+    v = inset + v * (1 - inset * 2)
+    const p = bilinearInQuad(u, v, useQuad.tl, useQuad.tr, useQuad.br, useQuad.bl)
+    return sampleLumaAt(data, W, H, p.x, p.y)
+  }
 
   function sampleVals(shellR, fov){
     const f = 1 / Math.tan(fov * 0.5)
     const vals = new Float32Array(DATA_COUNT)
     for(let b = 0; b < DATA_COUNT; b++){
-      const i = DATA_INDICES[b]
-      const x = particleDirs[i * 3] * shellR
-      const y = particleDirs[i * 3 + 1] * shellR
-      const z = particleDirs[i * 3 + 2] * shellR
-      const ex = x
-      const ey = y - camY
-      const ez = z - camZ
-      const invZ = 1 / Math.max(0.35, -ez)
-      const ndcX = f * ex * invZ
-      const ndcY = f * ey * invZ
-      let u = ndcX * 0.5 + 0.5
-      let v = -ndcY * 0.5 + 0.5
-      u = inset + u * (1 - inset * 2)
-      v = inset + v * (1 - inset * 2)
-      const p = bilinearInQuad(u, v, useQuad.tl, useQuad.tr, useQuad.br, useQuad.bl)
-      vals[b] = sampleLumaAt(data, W, H, p.x, p.y)
+      const base = b * BIT_REPS
+      let acc = 0
+      for(let r = 0; r < BIT_REPS; r++){
+        acc += sampleOne(DATA_INDICES[base + r], shellR, f)
+      }
+      vals[b] = acc / BIT_REPS
     }
     return vals
   }
 
-  // Try a few projection scales; keep the one with best SYNC@0 after thresholding.
+  // Lock projection once SYNC@0 is strong — saves FPS on phone.
+  let proj = sampleCloudBitsFromVideo._proj
   let bestBits = null
   let bestScore = -1
   let bestVals = null
-  for(const shellR of [0.84, 0.90, 0.96]){
-    for(const fovDeg of [36, 38, 40]){
-      const vals = sampleVals(shellR, fovDeg * Math.PI / 180)
-      const bits = bitsFromVals(vals)
-      const score = syncScoreAt(bits, 0)
-      if(score > bestScore){
-        bestScore = score
-        bestBits = bits
-        bestVals = vals
-      }
-      if(score >= 30) break
+  const tryProj = (shellR, fovDeg) => {
+    const vals = sampleVals(shellR, fovDeg * Math.PI / 180)
+    const bits = bitsFromVals(vals)
+    const score = syncScoreAt(bits, 0)
+    if(score > bestScore){
+      bestScore = score
+      bestBits = bits
+      bestVals = vals
+      sampleCloudBitsFromVideo._proj = { shellR, fovDeg }
     }
-    if(bestScore >= 30) break
+    return score
+  }
+
+  if(proj && decodeAlignLocked){
+    tryProj(proj.shellR, proj.fovDeg)
+    if(bestScore < 26){
+      for(const shellR of [0.84, 0.90, 0.96]){
+        for(const fovDeg of [36, 38, 40]) tryProj(shellR, fovDeg)
+      }
+    }
+  }else{
+    for(const shellR of [0.84, 0.90, 0.96]){
+      for(const fovDeg of [36, 38, 40]){
+        if(tryProj(shellR, fovDeg) >= 30) break
+      }
+      if(bestScore >= 30) break
+    }
   }
 
   if(!decodeBitAccum) decodeBitAccum = new Float32Array(DATA_COUNT)
@@ -1047,7 +1080,6 @@ function sampleCloudBitsFromVideo(){
   sampleCloudBitsFromVideo._meta = { quad: useQuad, aligned: !!quad }
 
   if(decodeBitFrames < DECODE_ACCUM_MIN) return null
-  // Prefer freshly scored bits if already strong; else re-threshold the accum.
   if(bestScore >= 28 && bestBits) return bestBits
   return bitsFromAccum(decodeBitAccum, decodeBitFrames)
 }
@@ -1340,6 +1372,31 @@ function tryFinish(){
   return true
 }
 
+function decodeBodyText(bodyBits, startLabel){
+  const maxBytes = Math.min(520, (bodyBits.length / 8) | 0)
+  let tried = 0
+  for(let blen = 8; blen <= maxBytes; blen++){
+    const body = bitsToBytes(bodyBits.slice(0, blen * 8))
+    if(body.length < 5) continue
+    tried++
+    const raw = body.subarray(0, body.length - 4)
+    const crc =
+      ((body[body.length - 4] << 24) |
+        (body[body.length - 3] << 16) |
+        (body[body.length - 2] << 8) |
+        body[body.length - 1]) >>> 0
+    if(crc32(raw) !== crc) continue
+    try{
+      const text = new TextDecoder().decode(raw)
+      if(text.startsWith("PC6M|") || text.startsWith("PC6|") ||
+         text.startsWith("PC5M|") || text.startsWith("PC5D|")){
+        return { text, tried, startLabel }
+      }
+    }catch(_){}
+  }
+  return { text: null, tried, startLabel }
+}
+
 function bitsToPayload(bits){
   if(!bits || bits.length < SYNC.length + 16) return null
   const candidates = []
@@ -1348,7 +1405,6 @@ function bitsToPayload(bits){
   for(let i = 0; i <= limit; i++){
     const ok = syncScoreAt(bits, i)
     if(ok > bestOk) bestOk = ok
-    // Real frames start with SYNC — ignore mid/end false matches unless nearly perfect.
     if(i <= 12 && ok >= 20) candidates.push({ i, ok })
     else if(ok >= 30) candidates.push({ i, ok })
   }
@@ -1359,34 +1415,57 @@ function bitsToPayload(bits){
     return null
   }
   candidates.sort((a, b) => b.ok - a.ok || a.i - b.i)
-  const seen = new Set()
+
   let triedLens = 0
-  for(const cand of candidates){
-    if(seen.has(cand.i)) continue
-    seen.add(cand.i)
-    if(seen.size > 8) break
+  const conf = bitsFromVals._conf
+  for(const cand of candidates.slice(0, 6)){
     const bodyBits = bits.slice(cand.i + SYNC.length)
-    const maxBytes = Math.min(520, (bodyBits.length / 8) | 0)
-    for(let blen = 8; blen <= maxBytes; blen++){
-      const body = bitsToBytes(bodyBits.slice(0, blen * 8))
-      if(body.length < 5) continue
-      triedLens++
-      const raw = body.subarray(0, body.length - 4)
-      const crc =
-        ((body[body.length - 4] << 24) |
-          (body[body.length - 3] << 16) |
-          (body[body.length - 2] << 8) |
-          body[body.length - 1]) >>> 0
-      if(crc32(raw) !== crc) continue
-      try{
-        const text = new TextDecoder().decode(raw)
-        if(text.startsWith("PC6M|") || text.startsWith("PC6|") ||
-           text.startsWith("PC5M|") || text.startsWith("PC5D|")){
+    let hit = decodeBodyText(bodyBits, `SYNC@${cand.i}(${cand.ok}/32)`)
+    triedLens += hit.tried
+    if(hit.text){
+      decodeDbg.crc = "ok"
+      decodeDbg.last = `${hit.startLabel} ${hit.text.slice(0, 24)}…`
+      return hit.text
+    }
+
+    // Soft chase: flip the most ambiguous body bits (near threshold).
+    if(conf && cand.i === 0 && cand.ok >= 24){
+      const amb = []
+      for(let i = SYNC.length; i < Math.min(bits.length, SYNC.length + 1600); i++){
+        amb.push({ i, c: conf[i] ?? 1e9 })
+      }
+      amb.sort((a, b) => a.c - b.c)
+      const top = amb.slice(0, 10).map(x => x.i)
+      const flipAt = (src, idx) => {
+        const arr = src.split("")
+        arr[idx] = arr[idx] === "1" ? "0" : "1"
+        return arr.join("")
+      }
+      // Singles
+      for(const idx of top){
+        const b2 = flipAt(bits, idx)
+        hit = decodeBodyText(b2.slice(SYNC.length), `flip1@${idx}`)
+        triedLens += hit.tried
+        if(hit.text){
           decodeDbg.crc = "ok"
-          decodeDbg.last = `SYNC@${cand.i}(${cand.ok}/32) ${text.slice(0, 24)}…`
-          return text
+          decodeDbg.last = `${hit.startLabel} ${hit.text.slice(0, 24)}…`
+          return hit.text
         }
-      }catch(_){}
+      }
+      // Pairs among top 8
+      for(let a = 0; a < Math.min(8, top.length); a++){
+        for(let b = a + 1; b < Math.min(8, top.length); b++){
+          let b2 = flipAt(bits, top[a])
+          b2 = flipAt(b2, top[b])
+          hit = decodeBodyText(b2.slice(SYNC.length), `flip2`)
+          triedLens += hit.tried
+          if(hit.text){
+            decodeDbg.crc = "ok"
+            decodeDbg.last = `${hit.startLabel} ${hit.text.slice(0, 24)}…`
+            return hit.text
+          }
+        }
+      }
     }
   }
   decodeDbg.crc = "fail"
@@ -1445,6 +1524,7 @@ async function startDecoder(){
   decodeAlignMiss = 0
   lastGoodQuad = null
   lastGoodQuadAge = 0
+  sampleCloudBitsFromVideo._proj = null
   decodeFrameNo = 0
   progressBar.style.width = "0%"
   progressText.textContent = "Frames: 0"
@@ -1592,11 +1672,10 @@ function idleDemoBits(){
   let bits = ""
   const t = performance.now() * 0.001
   for(let b = 0; b < DATA_COUNT; b++){
-    const i = DATA_INDICES[b]
+    const i = DATA_INDICES[b * BIT_REPS]
     const x = particleDirs ? particleDirs[i * 3] : 0
     const y = particleDirs ? particleDirs[i * 3 + 1] : 0
     const z = particleDirs ? particleDirs[i * 3 + 2] : 0
-    // 3D value noise-ish from hashes — isotropic, no Y stripes
     const n1 = Math.sin((x * 7.1 + z * 5.3) * 3.1 + t * 1.2 + hash01(i, 3) * 6.28)
     const n2 = Math.cos((y * 6.4 + x * 4.7) * 2.7 - t * 0.9 + hash01(i, 4) * 6.28)
     const n3 = Math.sin((z * 5.9 + y * 3.8 + t * 0.55) * 2.2 + hash01(i, 5) * 6.28)
