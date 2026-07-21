@@ -43,18 +43,20 @@ function setStatus(msg){
   statusEl.textContent = msg || ""
 }
 
-// --- Protocol (simple mode: prove decode, then scale up) ---
-const PARTICLE_COUNT = 12000
+// --- Protocol (simple mode: flat grid, prove CRC, then scale up) ---
+const PARTICLE_COUNT = 8000
 const BIT_REPS = 1
-const DATA_COUNT = 384 // logical bits/frame — small & spaced for a first successful decode
+const GRID_W = 16
+const GRID_H = 16
+const DATA_COUNT = GRID_W * GRID_H // 256 logical bits/frame
 const PHYS_COUNT = DATA_COUNT * BIT_REPS
-const FRAME_HOLD_MS = 1600
+const FRAME_HOLD_MS = 1800
 const FRAME_BLEND_MS = 0
-const SYMBOL_SIZE = 20
+const SYMBOL_SIZE = 16
 
 // Corner brackets on TX match these normalized positions (center of L-mark).
 const ALIGN_MARKER_UV = 0.075
-const SAMPLE_INSET = 0.14
+const SAMPLE_INSET = 0.08
 
 const SYNC = "11001100111100001010101011001100" // 32-bit
 
@@ -182,29 +184,29 @@ function fibonacciSphere(n){
   return pts
 }
 
-function fibonacciDisk(n){
-  // Camera-facing 2D layout — no depth projection ambiguity for decode.
-  const pts = new Float32Array(n * 2)
-  const golden = Math.PI * (3 - Math.sqrt(5))
-  for(let i = 0; i < n; i++){
-    const r = Math.sqrt((i + 0.5) / n)
-    const theta = i * golden
-    pts[i * 2] = Math.cos(theta) * r
-    pts[i * 2 + 1] = Math.sin(theta) * r
-  }
-  return pts
-}
-
 const PARTICLE_DIRS = fibonacciSphere(PARTICLE_COUNT)
 let particleDirs = PARTICLE_DIRS
 
-// Spaced front-disk carriers (not full sphere) — decoder samples DATA_UV directly.
-const DATA_DISK = fibonacciDisk(PHYS_COUNT)
-const DATA_UV = new Float32Array(PHYS_COUNT * 2) // screen u,v in [0,1] inside cloud quad
+const CAMERA_BASE = { x: 0, y: 0.08, z: 4.15 }
+
+function projectWorldToUV(x, y, z){
+  const fov = 38 * Math.PI / 180
+  const f = 1 / Math.tan(fov * 0.5)
+  const ey = y - CAMERA_BASE.y
+  const ez = z - CAMERA_BASE.z
+  const invZ = 1 / Math.max(0.25, -ez)
+  const ndcX = f * x * invZ
+  const ndcY = f * ey * invZ
+  return [ndcX * 0.5 + 0.5, -ndcY * 0.5 + 0.5]
+}
+
+// Regular grid on a flat plane — decoder UVs come from the same projection as the camera.
+const DATA_POS = new Float32Array(PHYS_COUNT * 3)
+const DATA_UV = new Float32Array(PHYS_COUNT * 2)
 const DATA_INDICES = (() => {
   const front = []
   for(let i = 0; i < PARTICLE_COUNT; i++){
-    if(PARTICLE_DIRS[i * 3 + 2] > 0.35) front.push(i)
+    if(PARTICLE_DIRS[i * 3 + 2] > 0.2) front.push(i)
   }
   for(let i = front.length - 1; i > 0; i--){
     const j = Math.floor(hash01(i, 42) * (i + 1))
@@ -214,10 +216,19 @@ const DATA_INDICES = (() => {
     throw new Error(`Need ${PHYS_COUNT} front particles, got ${front.length}`)
   }
   const idx = Int32Array.from(front.slice(0, PHYS_COUNT))
+  const planeZ = 0.55
+  const span = 1.55 // world XY extent of the bit grid
   for(let b = 0; b < PHYS_COUNT; b++){
-    // Map disk [-1,1] → UV with margin so samples stay inside the cloud.
-    DATA_UV[b * 2] = DATA_DISK[b * 2] * 0.42 + 0.5
-    DATA_UV[b * 2 + 1] = -DATA_DISK[b * 2 + 1] * 0.42 + 0.5
+    const gx = b % GRID_W
+    const gy = (b / GRID_W) | 0
+    const x = ((gx + 0.5) / GRID_W - 0.5) * span
+    const y = (0.5 - (gy + 0.5) / GRID_H) * span
+    DATA_POS[b * 3] = x
+    DATA_POS[b * 3 + 1] = y
+    DATA_POS[b * 3 + 2] = planeZ
+    const [u, v] = projectWorldToUV(x, y, planeZ)
+    DATA_UV[b * 2] = u
+    DATA_UV[b * 2 + 1] = v
   }
   return idx
 })()
@@ -285,13 +296,12 @@ let phaseStartedAt = 0
 let animPhase = "hold" // hold | blend
 let meta = null
 
-const CAMERA_BASE = { x: 0, y: 0.08, z: 4.15 }
-
 const vertexShader = /* glsl */`
 attribute float aPhase;
 attribute float aRadius;
 attribute float aSignal;
 attribute float aFill;
+attribute float aData;
 
 uniform float uTime;
 uniform float uSpin;
@@ -306,38 +316,38 @@ void main(){
   vSignal = aSignal;
   vFill = aFill;
 
-  vec3 dir = normalize(position);
-  float t = uTime;
-
-  // Layered shell + swirl — readable particles, not a solid blob
-  float shell = 0.72 + aRadius * 0.38;
-  float n1 = sin(t * 0.55 + aPhase * 6.2831853 + dir.y * 2.5);
-  float n2 = cos(t * 0.41 + aPhase * 5.2 + dir.x * 3.0);
-  float n3 = sin(t * 0.29 + dir.x * 4.5 + dir.z * 3.8 + aPhase);
-  // During encode, freeze motion so optical samples stay stable.
-  float motion = 1.0 - uEncode;
-  float breathe = shell * (1.0 + (n1 * 0.035 + n2 * 0.025) * motion);
-  vec3 up = abs(dir.y) > 0.92 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
-  vec3 tangential = normalize(cross(dir, up));
-  vec3 bitangent = normalize(cross(dir, tangential));
-  vec3 pos = dir * breathe
-    + tangential * (n3 * 0.055 * motion)
-    + bitangent * (n2 * 0.04 * motion);
-
-  float cs = cos(uSpin), sn = sin(uSpin);
-  pos = vec3(pos.x * cs - pos.z * sn, pos.y, pos.x * sn + pos.z * cs);
+  vec3 pos;
+  // Data bits stay on a flat plane (matches decoder UVs). Never re-spherize them.
+  if(aData > 0.5){
+    pos = position;
+  }else{
+    vec3 dir = normalize(position);
+    float t = uTime;
+    float shell = 0.72 + aRadius * 0.38;
+    float n1 = sin(t * 0.55 + aPhase * 6.2831853 + dir.y * 2.5);
+    float n2 = cos(t * 0.41 + aPhase * 5.2 + dir.x * 3.0);
+    float n3 = sin(t * 0.29 + dir.x * 4.5 + dir.z * 3.8 + aPhase);
+    float motion = 1.0 - uEncode;
+    float breathe = shell * (1.0 + (n1 * 0.035 + n2 * 0.025) * motion);
+    vec3 up = abs(dir.y) > 0.92 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
+    vec3 tangential = normalize(cross(dir, up));
+    vec3 bitangent = normalize(cross(dir, tangential));
+    pos = dir * breathe
+      + tangential * (n3 * 0.055 * motion)
+      + bitangent * (n2 * 0.04 * motion);
+    float cs = cos(uSpin), sn = sin(uSpin);
+    pos = vec3(pos.x * cs - pos.z * sn, pos.y, pos.x * sn + pos.z * cs);
+  }
 
   vec4 mv = modelViewMatrix * vec4(pos, 1.0);
   vDepth = -mv.z;
 
-  // Encode mode: large, hard dots for reliable camera readout
-  float size = mix(2.2, mix(4.8, 16.0, uEncode), aSignal) * mix(0.65, 1.05, aFill);
+  float size = mix(2.2, mix(4.8, 18.0, uEncode * aData), aSignal) * mix(0.65, 1.05, aFill);
   size *= mix(0.75, 1.15, aRadius);
-  float sizeCap = mix(9.0, 28.0, uEncode);
+  float sizeCap = mix(9.0, 30.0, uEncode * aData);
   gl_PointSize = clamp(size * (220.0 / max(50.0, -mv.z)), 1.5, sizeCap);
 
-  // Front hemisphere a bit brighter (parallax / depth cue)
-  vBright = 0.55 + 0.45 * smoothstep(-0.2, 0.85, -normalize((modelViewMatrix * vec4(dir, 0.0)).z));
+  vBright = mix(0.55, 1.0, aData) + 0.45 * smoothstep(-0.2, 0.85, -normalize((modelViewMatrix * vec4(normalize(position), 0.0)).z));
   gl_Position = projectionMatrix * mv;
 }
 `
@@ -408,6 +418,7 @@ function initCloud(){
   const radius = new Float32Array(PARTICLE_COUNT)
   const signal = new Float32Array(PARTICLE_COUNT)
   const fill = new Float32Array(PARTICLE_COUNT)
+  const dataFlag = new Float32Array(PARTICLE_COUNT)
   signalTarget = new Float32Array(PARTICLE_COUNT)
 
   for(let i = 0; i < PARTICLE_COUNT; i++){
@@ -420,19 +431,17 @@ function initCloud(){
     fill[i] = IS_DATA[i] ? 1 : 0.35 + hash01(i, 7) * 0.65
     signal[i] = IS_DATA[i] ? 0.1 : 0.08 + hash01(i, 8) * 0.2
     signalTarget[i] = signal[i]
+    dataFlag[i] = IS_DATA[i] ? 1 : 0
   }
-  // Place data carriers on a flat camera-facing disk (matches DATA_UV sampling).
+  // Flat grid in world space — must match projectWorldToUV / DATA_UV.
   for(let b = 0; b < PHYS_COUNT; b++){
     const pi = DATA_INDICES[b]
-    const x = DATA_DISK[b * 2] * 0.95
-    const y = DATA_DISK[b * 2 + 1] * 0.95
-    const z = 0.72
-    const len = Math.hypot(x, y, z) || 1
-    positions[pi * 3] = x / len
-    positions[pi * 3 + 1] = y / len
-    positions[pi * 3 + 2] = z / len
-    radius[pi] = 0.85
+    positions[pi * 3] = DATA_POS[b * 3]
+    positions[pi * 3 + 1] = DATA_POS[b * 3 + 1]
+    positions[pi * 3 + 2] = DATA_POS[b * 3 + 2]
+    radius[pi] = 1
     fill[pi] = 1
+    dataFlag[pi] = 1
   }
 
   const geo = new THREE.BufferGeometry()
@@ -443,6 +452,7 @@ function initCloud(){
   signalAttr.setUsage(THREE.DynamicDrawUsage)
   geo.setAttribute("aSignal", signalAttr)
   geo.setAttribute("aFill", new THREE.BufferAttribute(fill, 1))
+  geo.setAttribute("aData", new THREE.BufferAttribute(dataFlag, 1))
 
   uniforms = {
     uTime: { value: 0 },
@@ -486,11 +496,14 @@ function onResize(){
 }
 
 function setSignalBits(bitStr, snap){
-  // Decorative ambient first, then stamp data bits onto front carriers.
+  // During TX, hide decorative sphere so only the flat bit grid is visible.
   for(let i = 0; i < PARTICLE_COUNT; i++){
     if(IS_DATA[i]) continue
-    const twinkle = 0.5 + 0.5 * Math.sin(hash01(i, 11) * 6.283 + performance.now() * 0.00045)
-    signalTarget[i] = txRun ? 0.02 : (0.05 + 0.16 * twinkle)
+    if(txRun) signalTarget[i] = 0
+    else{
+      const twinkle = 0.5 + 0.5 * Math.sin(hash01(i, 11) * 6.283 + performance.now() * 0.00045)
+      signalTarget[i] = 0.05 + 0.16 * twinkle
+    }
   }
   for(let b = 0; b < DATA_COUNT; b++){
     const on = bitStr[b] === "1" ? 1 : 0.0
@@ -666,7 +679,7 @@ function encodeFile(file){
     canvasWrap.style.display = ""
     setSignalBits(frames[0], true)
     setStatus(
-      `Simple mode · ${DATA_COUNT} bits/frame · streaming “${meta.name}” · ${frames.length} frames · point camera here`
+      `Simple 16×16 grid · ${DATA_COUNT} bits/frame · “${meta.name}” · ${frames.length} frames · point camera here`
     )
   }
   reader.readAsArrayBuffer(file)
@@ -1026,19 +1039,14 @@ function sampleCloudBitsFromVideo(){
   decodeDbg.video = `${vw}×${vh}`
   decodeDbg.accum = decodeBitFrames
 
-  const inset = SAMPLE_INSET
-
   function sampleVals(){
     const vals = new Float32Array(DATA_COUNT)
     for(let b = 0; b < DATA_COUNT; b++){
       let acc = 0
       for(let r = 0; r < BIT_REPS; r++){
         const i = b * BIT_REPS + r
-        let u = DATA_UV[i * 2]
-        let v = DATA_UV[i * 2 + 1]
-        u = inset + u * (1 - inset * 2)
-        v = inset + v * (1 - inset * 2)
-        const p = bilinearInQuad(u, v, useQuad.tl, useQuad.tr, useQuad.br, useQuad.bl)
+        // DATA_UV already matches frozen camera projection of the flat grid.
+        const p = bilinearInQuad(DATA_UV[i * 2], DATA_UV[i * 2 + 1], useQuad.tl, useQuad.tr, useQuad.br, useQuad.bl)
         acc += sampleLumaAt(data, W, H, p.x, p.y)
       }
       vals[b] = acc / BIT_REPS
