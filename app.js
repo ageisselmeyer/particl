@@ -255,24 +255,35 @@ function bitsToBytes(bits){
 }
 
 // Stretch a short packet across the full grid so every frame fills the square.
+// Block-repeat is exactly invertible (unlike float index rounding).
 function expandBits(payload, n){
   const L = payload.length
   if(L <= 0) return "0".repeat(n)
   if(L >= n) return payload.slice(0, n)
+  const rep = (n / L) | 0
+  const extra = n - rep * L
   let out = ""
-  for(let i = 0; i < n; i++) out += payload[(i * L / n) | 0]
+  for(let i = 0; i < L; i++){
+    const copies = rep + (i < extra ? 1 : 0)
+    const bit = payload[i]
+    for(let c = 0; c < copies; c++) out += bit
+  }
   return out
 }
 
 function collapseVals(vals, targetLen){
   const n = vals.length
-  const out = new Float32Array(targetLen)
-  for(let i = 0; i < targetLen; i++){
-    const a = (i * n / targetLen) | 0
-    const b = Math.max(a + 1, ((i + 1) * n / targetLen) | 0)
+  const L = targetLen
+  if(L >= n) return vals.slice ? vals.slice(0, L) : Float32Array.from(vals).slice(0, L)
+  const rep = (n / L) | 0
+  const extra = n - rep * L
+  const out = new Float32Array(L)
+  let idx = 0
+  for(let i = 0; i < L; i++){
+    const copies = rep + (i < extra ? 1 : 0)
     let s = 0
-    for(let j = a; j < b; j++) s += vals[j]
-    out[i] = s / (b - a)
+    for(let c = 0; c < copies; c++) s += vals[idx++]
+    out[i] = s / copies
   }
   return out
 }
