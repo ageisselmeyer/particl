@@ -243,13 +243,132 @@ function getJsQR(){
     : null
 }
 
+function getZXing(){
+  return globalThis.ZXing || window.ZXing || null
+}
+
+/** Morphological dilate — closes gaps between circular modules so square-tuned finders lock. */
+function dilateImageDataInPlace(img, rad){
+  const { data, width: w, height: h } = img
+  const src = new Uint8ClampedArray(data)
+  const r = Math.max(1, rad | 0)
+  for(let y = r; y < h - r; y++){
+    for(let x = r; x < w - r; x++){
+      let dark = false
+      for(let dy = -r; dy <= r && !dark; dy++){
+        for(let dx = -r; dx <= r; dx++){
+          if(src[((y + dy) * w + (x + dx)) * 4] < 140) dark = true
+        }
+      }
+      if(dark){
+        const o = (y * w + x) * 4
+        data[o] = data[o + 1] = data[o + 2] = 0
+        data[o + 3] = 255
+      }
+    }
+  }
+  return img
+}
+
+function rgbaToLuminance(img){
+  const { data, width: w, height: h } = img
+  const lum = new Uint8ClampedArray(w * h)
+  for(let i = 0, j = 0; i < data.length; i += 4, j++){
+    lum[j] = (data[i] * 3 + data[i + 1] * 4 + data[i + 2]) >> 3
+  }
+  return lum
+}
+
+function tryZXingOnImageData(img, w, h){
+  const Z = getZXing()
+  if(!Z || typeof Z.QRCodeReader !== "function") return null
+  try{
+    const src = new Z.RGBLuminanceSource(rgbaToLuminance(img), w, h)
+    const bmp = new Z.BinaryBitmap(new Z.HybridBinarizer(src))
+    const hints = new Map()
+    hints.set(Z.DecodeHintType.TRY_HARDER, true)
+    hints.set(Z.DecodeHintType.POSSIBLE_FORMATS, [Z.BarcodeFormat.QR_CODE])
+    const result = new Z.QRCodeReader().decode(bmp, hints)
+    return result && result.getText ? result.getText() : null
+  }catch(_){
+    return null
+  }
+}
+
+function tryJsQROnImageData(jsQR, img, w, h){
+  const code = jsQR(img.data, w, h, { inversionAttempts: "dontInvert" })
+  return code && code.data ? code.data : null
+}
+
+async function scanQrFromVideo(){
+  if(!video.videoWidth) return null
+
+  // Prefer native detector (Safari / Chromium) — sometimes handles styled QR
+  if(detector){
+    try{
+      const codes = await detector.detect(video)
+      if(codes && codes.length){
+        decodeDbg.engine = "BarcodeDetector"
+        return codes[0].rawValue || null
+      }
+    }catch(_){}
+  }
+
+  const jsQR = getJsQR()
+  const hasZx = !!getZXing()
+  if(!jsQR && !hasZx){
+    decodeDbg.engine = detector ? "BarcodeDetector" : "none"
+    return null
+  }
+
+  const w = video.videoWidth
+  const h = video.videoHeight
+  const attempts = [
+    { max: 720, crop: 1, dilate: 1 },
+    { max: 960, crop: 1, dilate: 1 },
+    { max: 640, crop: 0.82, dilate: 2 },
+    { max: 720, crop: 1, dilate: 0 }
+  ]
+  const start = decodeFrameNo % attempts.length
+  for(let n = 0; n < attempts.length; n++){
+    const a = attempts[(start + n) % attempts.length]
+    const scale = Math.min(1, a.max / Math.max(w, h))
+    const cw = Math.max(1, (w * scale * a.crop) | 0)
+    const ch = Math.max(1, (h * scale * a.crop) | 0)
+    const sx = ((w - w * a.crop) / 2) | 0
+    const sy = ((h - h * a.crop) / 2) | 0
+    ensureScanCanvas(cw, ch)
+    scanCtx.drawImage(video, sx, sy, w * a.crop, h * a.crop, 0, 0, cw, ch)
+    const img = scanCtx.getImageData(0, 0, cw, ch)
+    if(a.dilate > 0) dilateImageDataInPlace(img, a.dilate)
+
+    if(hasZx){
+      const zx = tryZXingOnImageData(img, cw, ch)
+      if(zx){
+        decodeDbg.engine = `ZXing@${cw}d${a.dilate}`
+        return zx
+      }
+    }
+    if(jsQR){
+      const data = tryJsQROnImageData(jsQR, img, cw, ch)
+      if(data){
+        decodeDbg.engine = `jsQR@${cw}d${a.dilate}`
+        return data
+      }
+    }
+  }
+
+  decodeDbg.engine = hasZx ? "ZXing" : (jsQR ? "jsQR" : (detector ? "BarcodeDetector" : "none"))
+  return null
+}
+
 const CLOUD_PIXEL = 1024
 const PARTICLES_ON = 5
 const PARTICLES_FINDER = 9
-const PARTICLES_OFF = 0.02 // sparse ambient dust in empty modules
+const PARTICLES_OFF = 0.02
 
 let cloudParticles = null
-let cloudMeta = null // { n, margin }
+let cloudMeta = null
 let cloudAnimT0 = 0
 
 function hash01local(a, b){
@@ -854,59 +973,6 @@ function ensureScanCanvas(w, h){
     scanCanvas.height = h
   }
   return { sw: w, sh: h }
-}
-
-function tryJsQROnImageData(jsQR, img, w, h){
-  const code = jsQR(img.data, w, h, { inversionAttempts: "attemptBoth" })
-  return code && code.data ? code.data : null
-}
-
-async function scanQrFromVideo(){
-  if(!video.videoWidth) return null
-
-  // Prefer native detector (Safari / Chromium)
-  if(detector){
-    try{
-      const codes = await detector.detect(video)
-      if(codes && codes.length){
-        decodeDbg.engine = "BarcodeDetector"
-        return codes[0].rawValue || null
-      }
-    }catch(_){}
-  }
-
-  // jsQR: try a few scales / a center crop — dense QRs fail more often at one resolution
-  const jsQR = getJsQR()
-  if(jsQR){
-    const w = video.videoWidth
-    const h = video.videoHeight
-    const attempts = [
-      { max: 640, crop: 1 },
-      { max: 960, crop: 1 },
-      { max: 720, crop: 0.78 } // center square-ish crop
-    ]
-    // Rotate which attempt we try first so we don't always burn the same path
-    const start = decodeFrameNo % attempts.length
-    for(let n = 0; n < attempts.length; n++){
-      const a = attempts[(start + n) % attempts.length]
-      const scale = Math.min(1, a.max / Math.max(w, h))
-      const cw = Math.max(1, (w * scale * a.crop) | 0)
-      const ch = Math.max(1, (h * scale * a.crop) | 0)
-      const sx = ((w - w * a.crop) / 2) | 0
-      const sy = ((h - h * a.crop) / 2) | 0
-      ensureScanCanvas(cw, ch)
-      scanCtx.drawImage(video, sx, sy, w * a.crop, h * a.crop, 0, 0, cw, ch)
-      const img = scanCtx.getImageData(0, 0, cw, ch)
-      const data = tryJsQROnImageData(jsQR, img, cw, ch)
-      if(data){
-        decodeDbg.engine = `jsQR@${cw}`
-        return data
-      }
-    }
-  }
-
-  decodeDbg.engine = detector ? "BarcodeDetector" : (getJsQR() ? "jsQR" : "none")
-  return null
 }
 
 async function startDecoder(){
