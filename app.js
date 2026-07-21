@@ -16,6 +16,15 @@ const progressWrap = document.getElementById("decodeProgressWrap")
 const progressBar = document.getElementById("decodeProgressBar")
 const progressText = document.getElementById("decodeProgressText")
 const lockQuadEl = document.getElementById("lockQuad")
+const decodeChecklistEl = document.getElementById("decodeChecklist")
+const chkCornersRow = document.getElementById("chkCorners")
+const chkPayloadRow = document.getElementById("chkPayload")
+const chkReadyRow = document.getElementById("chkReady")
+const chkRecoveredRow = document.getElementById("chkRecovered")
+const chkCornersLabel = document.getElementById("chkCornersLabel")
+const chkPayloadLabel = document.getElementById("chkPayloadLabel")
+const chkReadyLabel = document.getElementById("chkReadyLabel")
+const chkRecoveredLabel = document.getElementById("chkRecoveredLabel")
 
 document.getElementById("btnEncode").addEventListener("click", () => {
   fileInput.value = ""
@@ -612,6 +621,8 @@ let rxK = null
 let rxR = null
 let rxSymbols = new Map() // seq -> { data, seed, indices }
 let rxDecodeCount = 0
+let rxPayloadOk = false
+let rxRecovered = false
 let decodeRunning = false
 let detector = null
 let decodeBitAccum = null
@@ -621,6 +632,8 @@ let decodeAlignMiss = 0
 const DECODE_ACCUM_MIN = 6
 const DECODE_ACCUM_MAX = 14
 let decodeFrameNo = 0
+let lastGoodQuad = null
+let lastGoodQuadAge = 0
 
 function bilinearInQuad(u, v, tl, tr, br, bl){
   const x =
@@ -647,24 +660,24 @@ function findCornerCentroid(data, W, H, x0, y0, w, h){
       const peak = Math.max(r8, g, b)
       const sat = peak - Math.min(r8, g, b)
       // Glossy screen: skip white specular blobs (they are not cyan brackets).
-      if(peak > 175 && sat < 45 && r8 > peak * 0.82) continue
+      if(peak > 190 && sat < 55 && r8 > peak * 0.85) continue
       const luma = r8 * 0.299 + g * 0.587 + b * 0.114
       const cyan = Math.max(0, (g + b) * 0.5 - r8 * 0.35)
       const bal = 1 - Math.min(1, (Math.abs(r8 - g) + Math.abs(g - b)) / 380)
       const weight = (luma * 0.28 + cyan * 0.52 + peak * 0.2) * (0.5 + 0.5 * bal)
-      if(weight < 32) continue
+      if(weight < 25) continue
       sx += x * weight
       sy += y * weight
       wsum += weight
     }
   }
-  if(wsum < 70) return null
+  if(wsum < 60) return null
   return { x: sx / wsum, y: sy / wsum }
 }
 
 function detectAlignQuad(data, W, H, rect){
   const { ox, oy, dw, dh } = rect
-  const pad = Math.round(Math.min(dw, dh) * 0.22)
+  const pad = Math.round(Math.min(dw, dh) * 0.27)
   const cTL = findCornerCentroid(data, W, H, ox | 0, oy | 0, pad, pad)
   const cTR = findCornerCentroid(data, W, H, (ox + dw - pad) | 0, oy | 0, pad, pad)
   const cBR = findCornerCentroid(data, W, H, (ox + dw - pad) | 0, (oy + dh - pad) | 0, pad, pad)
@@ -679,7 +692,8 @@ function detectAlignQuad(data, W, H, rect){
   if(minSide < Math.min(dw, dh) * 0.55) return null
   const maxSide = Math.max(wTop, wBot, hL, hR)
   if(maxSide > minSide * 1.5) return null
-  const tol = Math.min(dw, dh) * 0.16
+  // Expectation is approximate; keep tolerance high for glossy glare.
+  const tol = Math.min(dw, dh) * 0.28
   const expect = [
     { x: ox + ALIGN_MARKER_UV * dw, y: oy + ALIGN_MARKER_UV * dh },
     { x: ox + (1 - ALIGN_MARKER_UV) * dw, y: oy + ALIGN_MARKER_UV * dh },
@@ -705,7 +719,7 @@ function sampleLumaAt(data, W, H, x, y){
       const bb = data[p + 2], g = data[p + 1], r8 = data[p]
       const peak = Math.max(r8, g, bb)
       const sat = peak - Math.min(r8, g, bb)
-      if(peak > 175 && sat < 40 && r8 > peak * 0.8) continue
+      if(peak > 195 && sat < 35 && r8 > peak * 0.9) continue
       const luma = r8 * 0.299 + g * 0.587 + bb * 0.114
       const cyan = Math.max(0, (g + bb) * 0.5 - r8 * 0.3)
       acc += luma * 0.35 + peak * 0.35 + cyan * 0.3
@@ -778,9 +792,23 @@ function sampleCloudBitsFromVideo(){
 
   let quad = detectAlignQuad(data, W, H, { ox, oy, dw, dh })
   let useQuad = quad
-  if(!useQuad){
+  if(quad){
+    lastGoodQuad = quad
+    lastGoodQuadAge = 0
+    decodeAlignMiss = 0
+    decodeAlignLocked = true
+    updateLockOverlay(useQuad, { vw, vh, W, H, dw, dh, ox, oy })
+  }else if(lastGoodQuad && lastGoodQuadAge < 10){
+    // Glare can temporarily hide the corners; re-use the last stable quad.
+    useQuad = lastGoodQuad
+    lastGoodQuadAge++
+    decodeAlignMiss++
+    decodeAlignLocked = lastGoodQuadAge <= 3
+    updateLockOverlay(useQuad, { vw, vh, W, H, dw, dh, ox, oy })
+  }else{
     decodeAlignMiss++
     decodeAlignLocked = false
+    lastGoodQuadAge++
     if(lockQuadEl) lockQuadEl.style.display = "none"
     // Fallback: centered square (legacy path)
     const side = Math.min(dw, dh)
@@ -792,10 +820,6 @@ function sampleCloudBitsFromVideo(){
       br: { x: fx + side, y: fy + side },
       bl: { x: fx, y: fy + side }
     }
-  }else{
-    decodeAlignMiss = 0
-    decodeAlignLocked = true
-    updateLockOverlay(useQuad, { vw, vh, W, H, dw, dh, ox, oy })
   }
 
   const inset = SAMPLE_INSET
@@ -847,6 +871,73 @@ function resetRxState(){
   rxR = null
   rxSymbols = new Map()
   rxDecodeCount = 0
+  rxPayloadOk = false
+  rxRecovered = false
+}
+
+function setCheckRow(rowEl, ok, markEl, labelEl, labelText){
+  if(!rowEl) return
+  rowEl.dataset.state = ok ? "ok" : "bad"
+  if(markEl){
+    // ✓ / ✗ (HTML entity output kept ASCII-safe)
+    markEl.textContent = ok ? "\u2713" : "\u2717"
+  }
+  if(labelEl && labelText != null) labelEl.textContent = labelText
+}
+
+function updateDecodeChecklist(){
+  if(!decodeChecklistEl) return
+
+  const cornersOk = !!decodeAlignLocked
+  setCheckRow(
+    chkCornersRow,
+    cornersOk,
+    chkCornersRow?.querySelector(".chkMark"),
+    chkCornersLabel,
+    cornersOk ? "Corners locked" : "Find cyan corners"
+  )
+
+  const payloadLabel = rxFountain
+    ? "Valid PC6 symbol (CRC/SYNC)"
+    : "Valid payload (CRC/SYNC)"
+  setCheckRow(
+    chkPayloadRow,
+    !!rxPayloadOk,
+    chkPayloadRow?.querySelector(".chkMark"),
+    chkPayloadLabel,
+    payloadLabel
+  )
+
+  let readyOk = false
+  if(rxFountain){
+    readyOk = fountainDecodeReady()
+  }else if(rxTotal != null){
+    readyOk = rxHave.size >= rxTotal
+  }
+
+  const readyLabel = rxFountain
+    ? (rxK != null
+      ? `Decoding ready (${countUniqueSources()}/${rxK} sources)`
+      : "Decoding ready (waiting for PC6 meta)")
+    : (rxTotal != null
+      ? `All frames received (${rxHave.size}/${rxTotal})`
+      : "Decoding ready (waiting for PC5 meta)")
+
+  setCheckRow(
+    chkReadyRow,
+    readyOk,
+    chkReadyRow?.querySelector(".chkMark"),
+    chkReadyLabel,
+    readyLabel
+  )
+
+  setCheckRow(
+    chkRecoveredRow,
+    !!rxRecovered,
+    chkRecoveredRow?.querySelector(".chkMark"),
+    chkRecoveredLabel,
+    rxRecovered ? "File recovered" : "File recovered"
+  )
 }
 
 function ingestFountainSymbol(fileId, k, r, seq, seed, data){
@@ -985,6 +1076,8 @@ function tryFinishFountain(){
     `Recovered “${downloadLink.download}” (${finalBytes.length} bytes) · ${rxDecodeCount} frames decoded.`
   )
   try{ downloadLink.click() }catch(_){}
+  rxRecovered = true
+  updateDecodeChecklist()
   decodeRunning = false
   return true
 }
@@ -1014,6 +1107,8 @@ function tryFinish(){
   progressText.textContent = "Done"
   setStatus(`Recovered “${downloadLink.download}” (${finalBytes.length} bytes).`)
   try{ downloadLink.click() }catch(_){}
+  rxRecovered = true
+  updateDecodeChecklist()
   decodeRunning = false
   return true
 }
@@ -1098,9 +1193,13 @@ async function startDecoder(){
   resetDecodeAccum()
   decodeAlignLocked = false
   decodeAlignMiss = 0
+  lastGoodQuad = null
+  lastGoodQuadAge = 0
   decodeFrameNo = 0
   progressBar.style.width = "0%"
   progressText.textContent = "Frames: 0"
+  if(decodeChecklistEl) decodeChecklistEl.hidden = false
+  updateDecodeChecklist()
 
   let captureSettings = {}
   try{
@@ -1169,12 +1268,15 @@ async function decodeLoop(){
     progressBar.style.width = Math.min(100, Math.floor((have / rxTotal) * 100)) + "%"
   }
 
+  updateDecodeChecklist()
+
   // Primary: sample cloud bits
   if(video.videoWidth){
     const bits = sampleCloudBitsFromVideo()
     if(bits){
       const text = bitsToPayload(bits)
       if(text && ingestPayloadText(text)){
+        rxPayloadOk = true
         resetDecodeAccum()
         const prog = rxFountain
           ? `${rxSymbols.size} symbols · peeling…`
@@ -1193,6 +1295,7 @@ async function decodeLoop(){
       const codes = await detector.detect(video)
       for(const c of codes){
         if(ingestPayloadText(c.rawValue)){
+          rxPayloadOk = true
           if(tryFinish()) return
         }
       }

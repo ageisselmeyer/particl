@@ -3,6 +3,10 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#000000">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>PartiCl</title>
 <link rel="stylesheet" href="styles.css">
 <script type="importmap">
@@ -53,6 +57,25 @@
 
   <p id="status"></p>
   <a id="download" hidden>Download recovered file</a>
+
+  <div id="decodeChecklist" hidden aria-live="polite">
+    <div class="checkRow" id="chkCorners" data-state="bad">
+      <span class="chkMark" aria-hidden="true">&#10006;</span>
+      <span class="chkLabel" id="chkCornersLabel">Corners locked</span>
+    </div>
+    <div class="checkRow" id="chkPayload" data-state="bad">
+      <span class="chkMark" aria-hidden="true">&#10006;</span>
+      <span class="chkLabel" id="chkPayloadLabel">Valid payload (CRC/SYNC)</span>
+    </div>
+    <div class="checkRow" id="chkReady" data-state="bad">
+      <span class="chkMark" aria-hidden="true">&#10006;</span>
+      <span class="chkLabel" id="chkReadyLabel">Decoding ready</span>
+    </div>
+    <div class="checkRow" id="chkRecovered" data-state="bad">
+      <span class="chkMark" aria-hidden="true">&#10006;</span>
+      <span class="chkLabel" id="chkRecoveredLabel">File recovered</span>
+    </div>
+  </div>
 
   <script type="module" src="app.js"></script>
 </body>

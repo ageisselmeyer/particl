@@ -1,4 +1,5 @@
 :root{
+  color-scheme: dark;
   --bg:#000000;
   --text:#f5f5f7;
   --muted:#a1a1a6;
@@ -8,11 +9,17 @@
 
 *{ box-sizing:border-box; }
 
+html{
+  background:#000;
+}
+
 body{
   margin:0;
   min-height:100vh;
-  padding:20px 16px 40px;
-  background:radial-gradient(ellipse at 50% 20%, #0a1220 0%, #000 55%);
+  min-height:100dvh;
+  padding:max(20px, env(safe-area-inset-top)) 16px max(40px, env(safe-area-inset-bottom));
+  background:#000 radial-gradient(ellipse at 50% 20%, #0a1220 0%, #000 55%);
+  background-attachment:fixed;
   color:var(--text);
   font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",Arial,sans-serif;
   text-align:center;
@@ -166,6 +173,50 @@ button:active{ transform:translateY(0); }
   text-decoration:none;
 }
 #download[hidden]{ display:none !important; }
+
+#decodeChecklist{
+  width:min(92vw, 520px);
+  margin:14px auto 0;
+  text-align:left;
+}
+
+#decodeChecklist[hidden]{ display:none !important; }
+
+.checkRow{
+  display:flex;
+  align-items:center;
+  gap:10px;
+  padding:7px 10px;
+  border-radius:14px;
+  background:rgba(255,255,255,0.03);
+  border:1px solid rgba(255,255,255,0.06);
+}
+
+.checkRow + .checkRow{ margin-top:8px; }
+
+.chkMark{
+  width:22px;
+  text-align:center;
+  font-weight:900;
+}
+
+.checkRow[data-state="ok"]{
+  border-color:rgba(52,199,89,0.35);
+  background:rgba(52,199,89,0.08);
+}
+.checkRow[data-state="ok"] .chkMark{ color:#34c759; }
+
+.checkRow[data-state="bad"]{
+  border-color:rgba(255,59,48,0.35);
+  background:rgba(255,59,48,0.08);
+}
+.checkRow[data-state="bad"] .chkMark{ color:#ff3b30; }
+
+.chkLabel{
+  font-size:13px;
+  color:var(--muted);
+  line-height:1.25;
+}
 
 @media (max-width:700px){
   h1{ font-size:22px; }
