@@ -254,6 +254,29 @@ function bitsToBytes(bits){
   return out
 }
 
+// Stretch a short packet across the full grid so every frame fills the square.
+function expandBits(payload, n){
+  const L = payload.length
+  if(L <= 0) return "0".repeat(n)
+  if(L >= n) return payload.slice(0, n)
+  let out = ""
+  for(let i = 0; i < n; i++) out += payload[(i * L / n) | 0]
+  return out
+}
+
+function collapseVals(vals, targetLen){
+  const n = vals.length
+  const out = new Float32Array(targetLen)
+  for(let i = 0; i < targetLen; i++){
+    const a = (i * n / targetLen) | 0
+    const b = Math.max(a + 1, ((i + 1) * n / targetLen) | 0)
+    let s = 0
+    for(let j = a; j < b; j++) s += vals[j]
+    out[i] = s / (b - a)
+  }
+  return out
+}
+
 function utf8ToB64(str){
   return btoa(unescape(encodeURIComponent(str || "")))
 }
@@ -660,12 +683,9 @@ function buildFrames(fileBytes, fileMeta){
     body[3] = crc & 255
     body.set(raw, 4)
 
-    let bits = SYNC + bytesToBits(body)
-    if(bits.length > DATA_COUNT){
-      console.warn(`Packet ${pi} needs ${bits.length} bits but frame holds ${DATA_COUNT}; truncating`)
-      bits = bits.slice(0, DATA_COUNT)
-    }else{
-      bits = bits.padEnd(DATA_COUNT, "0")
+    let bits = expandBits(SYNC + bytesToBits(body), DATA_COUNT)
+    if(SYNC.length + body.length * 8 > DATA_COUNT){
+      console.warn(`Packet ${pi} needs ${SYNC.length + body.length * 8} bits but frame holds ${DATA_COUNT}`)
     }
     out.push(bits)
   }
@@ -924,28 +944,26 @@ function syncScoreAt(bits, start){
   return ok
 }
 
-function bitsFromVals(vals){
+function thresholdVals(vals){
+  const n = vals.length
   let sum = 0
-  for(let i = 0; i < DATA_COUNT; i++) sum += vals[i]
-  const mean = sum / DATA_COUNT
+  for(let i = 0; i < n; i++) sum += vals[i]
+  const mean = sum / n
   let varSum = 0
-  for(let i = 0; i < DATA_COUNT; i++){
+  for(let i = 0; i < n; i++){
     const d = vals[i] - mean
     varSum += d * d
   }
-  const std = Math.sqrt(varSum / DATA_COUNT)
-  decodeDbg.mean = mean
-  decodeDbg.std = std
+  const std = Math.sqrt(varSum / n)
 
-  // Independent Otsu threshold — do NOT maximize SYNC (that invents ~26/32 on noise).
   const bins = new Int32Array(32)
   let vmin = Infinity, vmax = -Infinity
-  for(let i = 0; i < DATA_COUNT; i++){
+  for(let i = 0; i < n; i++){
     if(vals[i] < vmin) vmin = vals[i]
     if(vals[i] > vmax) vmax = vals[i]
   }
   const span = Math.max(1e-3, vmax - vmin)
-  for(let i = 0; i < DATA_COUNT; i++){
+  for(let i = 0; i < n; i++){
     bins[Math.min(31, ((vals[i] - vmin) / span * 31) | 0)]++
   }
   let w0 = 0, sum0 = 0, bestT = 15, bestVar = -1, sumBins = 0
@@ -954,7 +972,7 @@ function bitsFromVals(vals){
     w0 += bins[t]
     if(!w0) continue
     sum0 += t * bins[t]
-    const w1 = DATA_COUNT - w0
+    const w1 = n - w0
     if(!w1) break
     const m0 = sum0 / w0, m1 = (sumBins - sum0) / w1
     const between = w0 * w1 * (m0 - m1) * (m0 - m1)
@@ -962,18 +980,24 @@ function bitsFromVals(vals){
   }
   const thr = vmin + ((bestT + 0.5) / 31) * span
   let bits = ""
-  const conf = new Float32Array(DATA_COUNT)
-  for(let i = 0; i < DATA_COUNT; i++){
+  const conf = new Float32Array(n)
+  for(let i = 0; i < n; i++){
     bits += vals[i] > thr ? "1" : "0"
     conf[i] = Math.abs(vals[i] - thr)
   }
-  const score = syncScoreAt(bits, 0)
-  decodeDbg.sync = score
-  decodeDbg.last = `otsu ${thr.toFixed(1)} · SYNC0 ${score}/32 (rand~16)`
-  bitsFromVals._thr = thr
-  bitsFromVals._conf = conf
+  return { bits, conf, thr, mean, std, sync: syncScoreAt(bits, 0) }
+}
+
+function bitsFromVals(vals){
+  const r = thresholdVals(vals)
+  decodeDbg.mean = r.mean
+  decodeDbg.std = r.std
+  decodeDbg.sync = r.sync
+  decodeDbg.last = `otsu ${r.thr.toFixed(1)} · SYNC0 ${r.sync}/32 (rand~16)`
+  bitsFromVals._thr = r.thr
+  bitsFromVals._conf = r.conf
   bitsFromVals._vals = vals
-  return bits
+  return r.bits
 }
 
 function bitsFromAccum(accum, frames){
@@ -982,6 +1006,84 @@ function bitsFromAccum(accum, frames){
   for(let i = 0; i < DATA_COUNT; i++) vals[i] = accum[i] / frames
   decodeDbg.accum = frames
   return bitsFromVals(vals)
+}
+
+// Packets are NN-stretched across the full grid — try logical lengths and collapse.
+function valsToPayload(vals){
+  if(!vals || vals.length < SYNC.length + 40) return null
+  const maxBody = Math.min(520, ((vals.length - SYNC.length) / 8) | 0)
+  const minBody = 5
+  // Prefer common PC6 / PC6M sizes first.
+  const bodies = []
+  for(let bb = minBody; bb <= maxBody; bb++) bodies.push(bb)
+  bodies.sort((a, b) => {
+    const da = Math.min(Math.abs(a - 47), Math.abs(a - 82))
+    const db = Math.min(Math.abs(b - 47), Math.abs(b - 82))
+    return da - db || a - b
+  })
+
+  let bestOk = 0
+  let triedLens = 0
+  let bestBits = null
+  let bestConf = null
+
+  for(const bb of bodies){
+    const L = SYNC.length + bb * 8
+    const cvals = collapseVals(vals, L)
+    const r = thresholdVals(cvals)
+    if(r.sync > bestOk){
+      bestOk = r.sync
+      bestBits = r.bits
+      bestConf = r.conf
+      decodeDbg.mean = r.mean
+      decodeDbg.std = r.std
+    }
+    if(r.sync < 26) continue
+    triedLens++
+    const hit = decodeBodyText(r.bits.slice(SYNC.length), `stretch@${L}(${r.sync}/32)`)
+    if(hit.text){
+      decodeDbg.sync = r.sync
+      decodeDbg.crc = "ok"
+      decodeDbg.last = `${hit.startLabel} ${hit.text.slice(0, 24)}…`
+      bitsFromVals._conf = r.conf
+      bitsFromVals._vals = cvals
+      return hit.text
+    }
+  }
+
+  decodeDbg.sync = bestOk
+  if(bestOk < 20){
+    decodeDbg.crc = "no-sync"
+    decodeDbg.last = `no SYNC (best ${bestOk}/32)`
+    return null
+  }
+
+  // Soft chase on the best-scoring logical length.
+  if(bestBits && bestConf && bestOk >= 24){
+    const amb = []
+    for(let i = SYNC.length; i < bestBits.length; i++) amb.push({ i, c: bestConf[i] ?? 1e9 })
+    amb.sort((a, b) => a.c - b.c)
+    const top = amb.slice(0, 10).map(x => x.i)
+    const flipAt = (src, idx) => {
+      const arr = src.split("")
+      arr[idx] = arr[idx] === "1" ? "0" : "1"
+      return arr.join("")
+    }
+    for(const idx of top){
+      const b2 = flipAt(bestBits, idx)
+      const hit = decodeBodyText(b2.slice(SYNC.length), `flip1@${idx}`)
+      triedLens += hit.tried
+      if(hit.text){
+        decodeDbg.crc = "ok"
+        decodeDbg.last = `${hit.startLabel} ${hit.text.slice(0, 24)}…`
+        return hit.text
+      }
+    }
+  }
+
+  decodeDbg.crc = "fail"
+  decodeDbg.last = `best SYNC ${bestOk}/32 · CRC miss (${triedLens} lens)`
+  return null
 }
 
 function updateLockOverlay(quad, meta){
@@ -1084,8 +1186,8 @@ function sampleCloudBitsFromVideo(){
   }
 
   const bestVals = sampleVals()
-  const bestBits = bitsFromVals(bestVals)
-  const bestScore = syncScoreAt(bestBits, 0)
+  bitsFromVals(bestVals) // updates debug meters from full-frame samples
+  const bestScore = decodeDbg.sync || 0
 
   if(!decodeBitAccum) decodeBitAccum = new Float32Array(DATA_COUNT)
   for(let i = 0; i < DATA_COUNT; i++) decodeBitAccum[i] += bestVals[i]
@@ -1099,8 +1201,11 @@ function sampleCloudBitsFromVideo(){
   sampleCloudBitsFromVideo._meta = { quad: useQuad, aligned: !!quad }
 
   if(decodeBitFrames < DECODE_ACCUM_MIN) return null
-  if(bestScore >= 28 && bestBits && decodeAlignLocked) return bestBits
-  return bitsFromAccum(decodeBitAccum, decodeBitFrames)
+  if(bestScore >= 22 && decodeAlignLocked) return bestVals
+  const accumVals = new Float32Array(DATA_COUNT)
+  for(let i = 0; i < DATA_COUNT; i++) accumVals[i] = decodeBitAccum[i] / decodeBitFrames
+  decodeDbg.accum = decodeBitFrames
+  return accumVals
 }
 
 function resetDecodeAccum(){
@@ -1663,11 +1768,11 @@ async function decodeLoop(){
   updateDecodeMeters()
   updateDecodeDebug()
 
-  // Primary: sample cloud bits
+  // Primary: sample cloud bits (full-grid vals; packets are stretch-encoded)
   if(video.videoWidth){
-    const bits = sampleCloudBitsFromVideo()
-    if(bits){
-      const text = bitsToPayload(bits)
+    const vals = sampleCloudBitsFromVideo()
+    if(vals){
+      const text = valsToPayload(vals) || bitsToPayload(bitsFromVals(vals))
       if(text && ingestPayloadText(text)){
         rxPayloadOk = true
         resetDecodeAccum()
@@ -1685,7 +1790,7 @@ async function decodeLoop(){
     }else{
       decodeDbg.last = decodeBitFrames < DECODE_ACCUM_MIN
         ? `warming accum ${decodeBitFrames}/${DECODE_ACCUM_MIN}`
-        : "no bits yet"
+        : "no samples yet"
       updateDecodeDebug()
     }
   }
