@@ -313,7 +313,7 @@ function ensureCloudCanvas(){
   if(!cloudCanvas) throw new Error("cloud canvas missing")
   cloudCanvas.hidden = false
   cloudCanvas.style.display = "block"
-  cloudCanvas.style.background = "#000"
+  cloudCanvas.style.background = "#fff"
   // Fixed backing store. Do NOT pass {alpha:false} — if a 2d context was
   // already created (classic boot script), mismatched attrs return null and
   // leave a cleared white canvas.
@@ -422,12 +422,13 @@ function showQrUi(){
   if(cloudCanvas){
     cloudCanvas.hidden = false
     cloudCanvas.style.display = "block"
-    cloudCanvas.style.background = "#000"
+    cloudCanvas.style.background = "#fff"
   }
   const align = document.getElementById("alignFrame")
   if(align) align.hidden = true
-  canvasWrap.classList.remove("tx-paper")
-  canvasWrap.classList.add("tx-cloud")
+  canvasWrap.classList.remove("tx-cloud")
+  canvasWrap.classList.add("tx-paper")
+  canvasWrap.style.background = "#fff"
   canvasWrap.style.display = ""
   videoWrap.hidden = true
 }
@@ -572,7 +573,7 @@ function encodeFile(file){
       txRaf = requestAnimationFrame(loop)
       const ft = frames._fountain || {}
       setStatus(
-        `Particle QR · “${meta.name}” · ${frames.length} frames · ` +
+        `QR · “${meta.name}” · ${frames.length} frames · ` +
         `need any ${ft.need} of ${ft.total} · point camera here`
       )
     }catch(err){
@@ -1046,7 +1047,7 @@ function bootQr(){
     }
     drawQrToCanvas("PartiCl QR ready - Encode a file")
     ensureRs().catch((e) => console.warn("RS preload failed", e))
-    setStatus("Particle QR · Encode a file — or Decode with the camera.")
+    setStatus("QR · Encode a file — or Decode with the camera.")
   }catch(err){
     console.error(err)
     setStatus(`Cloud failed: ${err.message || err}`)
