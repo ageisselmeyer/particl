@@ -369,10 +369,10 @@ void main(){
   vec4 mv = modelViewMatrix * vec4(pos, 1.0);
   vDepth = -mv.z;
 
-  float size = mix(2.2, mix(4.8, mix(14.0, 13.5, uPaper), uEncode * aData), aSignal) * mix(0.65, 1.05, aFill);
+  float size = mix(2.2, mix(4.8, mix(14.0, 16.0, uPaper), uEncode * aData), aSignal) * mix(0.65, 1.05, aFill);
   size *= mix(0.75, 1.15, aRadius);
-  // ~0.7–0.8 of cell pitch: thick enough for phone AF, not a full neighbor merge.
-  float sizeCap = mix(9.0, mix(20.0, 18.0, uPaper), uEncode * aData);
+  // Thick discs phone cameras can resolve; center-sampling + deblur handle mild overlap.
+  float sizeCap = mix(9.0, mix(20.0, 24.0, uPaper), uEncode * aData);
   gl_PointSize = clamp(size * (220.0 / max(50.0, -mv.z)), 1.5, sizeCap);
 
   // Flat data bits: uniform brightness (sphere-facing term made the lower grid look dead).
@@ -952,18 +952,25 @@ function sampleInkAt(data, W, H, x, y){
   return Math.max(0, 255 - sampleLumaAt(data, W, H, x, y))
 }
 
-// Center-weighted ink — do NOT take max over a wide window (that steals neighbor dots under blur).
+// Center-heavy ink sample with a tiny local max — thick soft dots still register.
 function sampleCenterInk(data, W, H, x, y){
-  const weights = [
-    [0, 0, 4],
-    [-1, 0, 1], [1, 0, 1], [0, -1, 1], [0, 1, 1]
-  ]
-  let acc = 0, wsum = 0
-  for(const [dx, dy, w] of weights){
-    acc += sampleInkAt(data, W, H, x + dx, y + dy) * w
-    wsum += w
+  let peak = 0
+  for(let dy = -2; dy <= 2; dy++){
+    for(let dx = -2; dx <= 2; dx++){
+      const w = (dx === 0 && dy === 0) ? 3 : (Math.abs(dx) + Math.abs(dy) === 1 ? 1.2 : 0.35)
+      const v = sampleInkAt(data, W, H, x + dx, y + dy)
+      if(v > peak) peak = v
+      // also accumulate for blend
+    }
   }
-  return acc / wsum
+  // Prefer peak of a small neighborhood (soft AF) but stay near the cell center.
+  let acc = sampleInkAt(data, W, H, x, y) * 2
+  acc += sampleInkAt(data, W, H, x - 1, y)
+  acc += sampleInkAt(data, W, H, x + 1, y)
+  acc += sampleInkAt(data, W, H, x, y - 1)
+  acc += sampleInkAt(data, W, H, x, y + 1)
+  const center = acc / 6
+  return center * 0.45 + peak * 0.55
 }
 
 // Mild spatial unsharp on the bit grid to undo camera blur bleed.
@@ -1247,8 +1254,24 @@ function sampleCloudBitsFromVideo(){
   }
 
   const bestVals = sampleVals()
-  bitsFromVals(bestVals)
-  const bestScore = decodeDbg.sync || 0
+  // Raw stretched frame SYNC is meaningless (~16). Probe collapsed lengths for the meter.
+  let probeSync = 0
+  let probeStd = 0
+  let probeMean = 0
+  for(const bb of [47, 82, 60, 100]){
+    const L = SYNC.length + bb * 8
+    if(L > bestVals.length) continue
+    const r = thresholdVals(collapseVals(bestVals, L))
+    if(r.sync > probeSync){
+      probeSync = r.sync
+      probeStd = r.std
+      probeMean = r.mean
+    }
+  }
+  decodeDbg.sync = probeSync
+  decodeDbg.mean = probeMean
+  decodeDbg.std = probeStd
+  decodeDbg.last = `probe SYNC ${probeSync}/32 · std ${probeStd.toFixed(1)}`
 
   if(!decodeBitAccum) decodeBitAccum = new Float32Array(DATA_COUNT)
   for(let i = 0; i < DATA_COUNT; i++) decodeBitAccum[i] += bestVals[i]
@@ -1262,8 +1285,8 @@ function sampleCloudBitsFromVideo(){
   sampleCloudBitsFromVideo._meta = { quad: useQuad, aligned: !!quad }
 
   if(decodeBitFrames < DECODE_ACCUM_MIN) return null
-  // Return raw ink samples — valsToPayload collapses the full-square stretch.
-  if(bestScore >= 18 && decodeAlignLocked) return bestVals
+  // Always decode when corners are locked — don't gate on raw-frame SYNC.
+  if(decodeAlignLocked) return bestVals
   const accumVals = new Float32Array(DATA_COUNT)
   for(let i = 0; i < DATA_COUNT; i++) accumVals[i] = decodeBitAccum[i] / decodeBitFrames
   decodeDbg.accum = decodeBitFrames
@@ -1835,6 +1858,8 @@ async function decodeLoop(){
     const vals = sampleCloudBitsFromVideo()
     if(vals){
       const text = valsToPayload(vals)
+      updateDecodeMeters()
+      updateDecodeDebug()
       if(text && ingestPayloadText(text)){
         rxPayloadOk = true
         resetDecodeAccum()
