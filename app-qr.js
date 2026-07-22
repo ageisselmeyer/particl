@@ -400,11 +400,9 @@ function handleDecodedText(text, engineLabel){
   decodeDbg.last = text.slice(0, 48) + (text.length > 48 ? "…" : "")
   if(text !== lastQrText){
     lastQrText = text
-      if(ingestPayloadText(text)){
+    if(ingestPayloadText(text)){
       rxPayloadOk = true
-      if((decodeFrameNo & 7) === 0){
-        setStatus(`MDS ${rxSymbols.size}/${rxN} · need any ${rxK} · q${decodeQueue.length}`)
-      }
+      setStatus(`MDS ${rxSymbols.size}/${rxN} · need any ${rxK} · q${decodeQueue.length}`)
       tryFinish()
     }else{
       decodeDbg.last = `ignored: ${text.slice(0, 40)}`
