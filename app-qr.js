@@ -49,7 +49,9 @@ function setStatus(msg){
 // ~2KB file → 20 QR frames, any 10 recover (Reed–Solomon MDS across packets).
 const TARGET_K = 10
 const TARGET_N = 20
-const MAX_SYMBOL_BYTES = 220
+const MAX_N = 40 // hard cap — optical TX cannot usefully cycle thousands of frames
+const MAX_SYMBOL_BYTES = 800 // larger QR capacity; keeps n small for bigger files
+const PRERENDER_MAX = 48 // only prerender small transfers (bitmaps thrash past this)
 const FRAME_HOLD_MS = 75
 const QR_ECC = "Q"
 const QR_CELL = 10
@@ -64,6 +66,7 @@ let meta = null
 let txRaf = 0
 let txBitmaps = [] // prerendered ImageBitmaps for fast blit
 let txStatusAt = 0
+let txLivePaint = false
 
 function fountainRng(seed){
   let s = seed >>> 0
@@ -661,12 +664,13 @@ function clearTxBitmaps(){
 async function prerenderTxFrames(texts){
   clearTxBitmaps()
   if(typeof window.__particlPaintCloud !== "function") return false
+  if(texts.length > PRERENDER_MAX) return false
   setStatus(`Rendering ${texts.length} QR frames…`)
   for(let i = 0; i < texts.length; i++){
     window.__particlPaintCloud(texts[i])
     const bmp = await createImageBitmap(cloudCanvas)
     txBitmaps.push(bmp)
-    if((i & 3) === 0){
+    if((i & 1) === 0){
       setStatus(`Rendering QR frames… ${i + 1}/${texts.length}`)
       await new Promise((r) => requestAnimationFrame(r))
     }
@@ -694,9 +698,13 @@ function planCoding(fileLen){
   let k = TARGET_K
   let n = TARGET_N
   let sym = Math.max(1, Math.ceil(fileLen / k))
-  while(sym > MAX_SYMBOL_BYTES){
+  while(sym > MAX_SYMBOL_BYTES && n < MAX_N){
     k += 1
-    n = k * 2
+    n = Math.min(MAX_N, k * 2)
+    if(n >= MAX_N){
+      k = Math.floor(MAX_N / 2)
+      n = MAX_N
+    }
     sym = Math.max(1, Math.ceil(fileLen / k))
   }
   return { k, n, sym, nsym: n - k }
@@ -797,25 +805,40 @@ function encodeFile(file){
       frames = buildFrames(bytes, meta)
       const qrcode = getQrCode()
       const longest = frames.reduce((a, b) => (a.length >= b.length ? a : b), "")
-      const probe = qrcode(0, QR_ECC)
-      probe.addData(longest, "Byte")
-      probe.make()
+      let probe
+      try{
+        probe = qrcode(0, QR_ECC)
+        probe.addData(longest, "Byte")
+        probe.make()
+      }catch(e){
+        throw new Error(
+          `File too large for one QR burst (${(bytes.length / 1024).toFixed(0)} KB → ${frames.length} frames). ` +
+          `Try a smaller file (a few KB works best).`
+        )
+      }
       window.__particlQrType = Math.round((probe.getModuleCount() - 17) / 4)
 
       frameIndex = 0
-      phaseStartedAt = 0
       txRun++
       modeButtons.classList.add("is-hidden")
       showQrUi()
 
-      const ok = await prerenderTxFrames(frames)
-      if(!ok){
-        // Fallback: live paint each frame
-        clearTxBitmaps()
-        drawQrToCanvas(frames[0])
+      txLivePaint = frames.length > PRERENDER_MAX
+      if(!txLivePaint){
+        const ok = await prerenderTxFrames(frames)
+        if(!ok){
+          clearTxBitmaps()
+          txLivePaint = true
+        }
       }else{
-        blitTxBitmap(0)
+        clearTxBitmaps()
       }
+      if(txLivePaint) drawQrToCanvas(frames[0])
+      else blitTxBitmap(0)
+
+      // Start clock AFTER prerender so we don't catch up a huge elapsed gap
+      phaseStartedAt = performance.now()
+      txStatusAt = 0
 
       if(txRaf) cancelAnimationFrame(txRaf)
       const run = txRun
@@ -843,20 +866,16 @@ function tickTx(now){
   if(!frames.length) return
   if(!phaseStartedAt) phaseStartedAt = now
   let elapsed = now - phaseStartedAt
-  let changed = false
-  while(elapsed >= FRAME_HOLD_MS){
-    elapsed -= FRAME_HOLD_MS
-    phaseStartedAt += FRAME_HOLD_MS
+  // Advance at most one frame per rAF — no catch-up skip after a hitch
+  if(elapsed >= FRAME_HOLD_MS){
+    phaseStartedAt = now
     frameIndex = (frameIndex + 1) % frames.length
-    changed = true
-  }
-  if(changed){
-    if(txBitmaps.length === frames.length) blitTxBitmap(frameIndex)
-    else drawQrToCanvas(frames[frameIndex])
-  }
-  if(changed && (now - txStatusAt > 200)){
-    txStatusAt = now
-    setStatus(`Cloud frame ${frameIndex + 1} / ${frames.length} · “${meta?.name || "file"}”`)
+    if(txLivePaint || txBitmaps.length !== frames.length) drawQrToCanvas(frames[frameIndex])
+    else blitTxBitmap(frameIndex)
+    if(now - txStatusAt > 200){
+      txStatusAt = now
+      setStatus(`Cloud frame ${frameIndex + 1} / ${frames.length} · “${meta?.name || "file"}”`)
+    }
   }
 }
 
