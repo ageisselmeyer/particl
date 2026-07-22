@@ -395,6 +395,17 @@ function enqueueDecodeJob(imgData, dilate, tryHarder){
   pumpDecodeQueue()
 }
 
+function rxStatusLine(){
+  if(rxMode === "chunked"){
+    const done = rxChunkData.size
+    const total = rxChunkCount ?? "?"
+    let uniq = 0
+    for(const m of rxChunkSymbols.values()) uniq += m.size
+    return `MDS chunks ${done}/${total} · ${uniq} QRs · q${decodeQueue.length}`
+  }
+  return `MDS ${rxSymbols.size}/${rxN} · need any ${rxK} · q${decodeQueue.length}`
+}
+
 function handleDecodedText(text, engineLabel){
   qrHitStreak++
   qrMissStreak = 0
@@ -405,12 +416,12 @@ function handleDecodedText(text, engineLabel){
     lastQrText = text
     if(ingestPayloadText(text)){
       rxPayloadOk = true
-      setStatus(`MDS ${rxSymbols.size}/${rxN} · need any ${rxK} · q${decodeQueue.length}`)
+      setStatus(rxStatusLine())
       tryFinish()
     }else{
       decodeDbg.last = `ignored: ${text.slice(0, 40)}`
     }
-  }else if(rxFountain && rxSymbols.size >= (rxK || 0)){
+  }else if(rxFountain){
     tryFinish()
   }
 }
@@ -754,40 +765,63 @@ function decodeRsPackets(symbolMap, k, n, symLen){
   return sources
 }
 
-function buildFrames(fileBytes, fileMeta){
-  const fileId = (crypto.getRandomValues(new Uint32Array(1))[0] >>> 0).toString(36)
-  const { k, n, sym } = planCoding(fileBytes.length)
+/** Bytes of file data per MDS burst (keeps each burst ≤ TARGET_N QRs). */
+const CHUNK_PAYLOAD = TARGET_K * MAX_SYMBOL_BYTES
+
+function appendMdsBurst(out, fileId, fileMeta, chunkIdx, chunkCount, chunkBytes){
+  const { k, n, sym } = planCoding(chunkBytes.length)
   const padded = new Uint8Array(k * sym)
-  padded.set(fileBytes)
+  padded.set(chunkBytes)
   const sources = []
   for(let i = 0; i < k; i++) sources.push(padded.subarray(i * sym, (i + 1) * sym))
   const packetData = encodeRsPackets(sources, n)
 
   const order = Array.from({ length: n }, (_, i) => i)
   for(let i = order.length - 1; i > 0; i--){
-    const j = Math.floor(hash01(i, 91) * (i + 1))
+    const j = Math.floor(hash01(i + chunkIdx * 17, 91) * (i + 1))
     const t = order[i]; order[i] = order[j]; order[j] = t
   }
 
-  const out = []
   for(let pi = 0; pi < order.length; pi++){
     const seq = order[pi]
-    // Meta (incl. filename) on every frame so download name survives missed packets
     const dataB64 = bytesToB64(packetData[seq])
-    const payload = [
-      "PC7M",
+    out.push([
+      "PC8M",
       fileId,
+      String(chunkIdx),
+      String(chunkCount),
       String(k),
       String(n),
       String(fileMeta.size >>> 0),
+      String(chunkBytes.length >>> 0),
       utf8ToB64(fileMeta.name || "file"),
       utf8ToB64(fileMeta.type || "application/octet-stream"),
       String(seq),
       dataB64
-    ].join("|")
-    out.push(payload)
+    ].join("|"))
   }
-  out._fountain = { k, n, r: n - k, sym, total: n, need: k }
+  return { k, n, sym }
+}
+
+function buildFrames(fileBytes, fileMeta){
+  const fileId = (crypto.getRandomValues(new Uint32Array(1))[0] >>> 0).toString(36)
+  const chunkCount = Math.max(1, Math.ceil(fileBytes.length / CHUNK_PAYLOAD))
+  const out = []
+  let need = 0
+  for(let c = 0; c < chunkCount; c++){
+    const start = c * CHUNK_PAYLOAD
+    const slice = fileBytes.subarray(start, Math.min(start + CHUNK_PAYLOAD, fileBytes.length))
+    const burst = appendMdsBurst(out, fileId, fileMeta, c, chunkCount, slice)
+    need += burst.k
+  }
+  out._fountain = {
+    k: TARGET_K,
+    n: TARGET_N,
+    chunks: chunkCount,
+    total: out.length,
+    need,
+    chunkPayload: CHUNK_PAYLOAD
+  }
   return out
 }
 
@@ -812,8 +846,8 @@ function encodeFile(file){
         probe.make()
       }catch(e){
         throw new Error(
-          `File too large for one QR burst (${(bytes.length / 1024).toFixed(0)} KB → ${frames.length} frames). ` +
-          `Try a smaller file (a few KB works best).`
+          `QR payload too large for a single frame (${longest.length} chars). ` +
+          `Try lowering MAX_SYMBOL_BYTES or file content.`
         )
       }
       window.__particlQrType = Math.round((probe.getModuleCount() - 17) / 4)
@@ -836,7 +870,6 @@ function encodeFile(file){
       if(txLivePaint) drawQrToCanvas(frames[0])
       else blitTxBitmap(0)
 
-      // Start clock AFTER prerender so we don't catch up a huge elapsed gap
       phaseStartedAt = performance.now()
       txStatusAt = 0
 
@@ -849,9 +882,10 @@ function encodeFile(file){
       }
       txRaf = requestAnimationFrame(loop)
       const ft = frames._fountain || {}
+      const mins = ((frames.length * FRAME_HOLD_MS) / 60000).toFixed(1)
       setStatus(
-        `QR · “${meta.name}” · ${frames.length} frames · ` +
-        `need any ${ft.need} of ${ft.total} · point camera here`
+        `QR · “${meta.name}” · ${ft.chunks || 1} chunks · ${frames.length} frames` +
+        ` (~${mins}m/loop) · need ~${ft.need} unique · point camera here`
       )
     }catch(err){
       console.error(err)
@@ -886,11 +920,16 @@ let rxTotal = null
 let rxFileId = null
 let rxMeta = null
 let rxFountain = false
+let rxMode = null // "legacy" | "chunked"
 let rxK = null
 let rxN = null
 let rxR = null
 let rxSymLen = null
 let rxSymbols = new Map()
+let rxChunkCount = null
+let rxChunkSymbols = new Map() // chunkIdx -> Map(seq -> bytes)
+let rxChunkInfo = new Map() // chunkIdx -> {k,n,symLen,chunkLen}
+let rxChunkData = new Map() // chunkIdx -> recovered bytes
 let rxDecodeCount = 0
 let rxPayloadOk = false
 let rxRecovered = false
@@ -958,11 +997,19 @@ function updateDecodeMeters(){
   let crcScore = 0
   let crcLabel = "waiting"
   if(rxRecovered || rxPayloadOk){
-    const need = Math.max(1, rxK || 1)
-    crcScore = rxRecovered ? 100 : Math.min(95, Math.round((rxSymbols.size / need) * 95))
-    crcLabel = rxRecovered
-      ? "recovered"
-      : `${rxSymbols.size}/${rxK} of ${rxN ?? "?"}`
+    if(rxMode === "chunked"){
+      const need = Math.max(1, rxChunkCount || 1)
+      crcScore = rxRecovered ? 100 : Math.min(95, Math.round((rxChunkData.size / need) * 95))
+      crcLabel = rxRecovered
+        ? "recovered"
+        : `chunks ${rxChunkData.size}/${rxChunkCount ?? "?"}`
+    }else{
+      const need = Math.max(1, rxK || 1)
+      crcScore = rxRecovered ? 100 : Math.min(95, Math.round((rxSymbols.size / need) * 95))
+      crcLabel = rxRecovered
+        ? "recovered"
+        : `${rxSymbols.size}/${rxK} of ${rxN ?? "?"}`
+    }
   }
   decodeQuality.crcScore = crcScore
   if(crcScore > decodeQuality.crcPeak) decodeQuality.crcPeak = crcScore
@@ -979,7 +1026,9 @@ function updateDecodeDebug(){
   decodeDebugEl.textContent = [
     `frame ${decodeFrameNo} · ${decodeDbg.video} · ~${decodeDbg.fps} fps`,
     `engine ${decodeDbg.engine} · hits ${decodeDbg.hits} · streak ${qrHitStreak}`,
-    `mds unique=${rxSymbols.size}/${rxN ?? "?"} · need ${rxK ?? "?"} · scans=${rxDecodeCount}`,
+    `mds ${rxMode === "chunked"
+      ? `chunks ${rxChunkData.size}/${rxChunkCount ?? "?"} · scans=${rxDecodeCount}`
+      : `unique=${rxSymbols.size}/${rxN ?? "?"} · need ${rxK ?? "?"} · scans=${rxDecodeCount}`}`,
     `last: ${decodeDbg.last}`
   ].join("\n")
 }
@@ -991,11 +1040,16 @@ function resetRxState(){
   rxFileId = null
   rxMeta = null
   rxFountain = false
+  rxMode = null
   rxK = null
   rxN = null
   rxR = null
   rxSymLen = null
   rxSymbols = new Map()
+  rxChunkCount = null
+  rxChunkSymbols = new Map()
+  rxChunkInfo = new Map()
+  rxChunkData = new Map()
   rxDecodeCount = 0
   rxPayloadOk = false
   rxRecovered = false
@@ -1010,8 +1064,10 @@ function ingestMdsSymbol(fileId, k, n, seq, data){
   if(!data || !data.length) return false
   if(rxFileId == null) rxFileId = fileId
   if(fileId !== rxFileId) return false
+  if(rxMode === "chunked") return false
   if(rxSymLen != null && data.length !== rxSymLen) return false
   rxFountain = true
+  rxMode = "legacy"
   rxK = k
   rxN = n
   rxR = n - k
@@ -1024,8 +1080,53 @@ function ingestMdsSymbol(fileId, k, n, seq, data){
   return true
 }
 
+function ingestChunkSymbol(fileId, chunkIdx, chunkCount, k, n, chunkLen, seq, data){
+  if(!Number.isFinite(chunkIdx) || !Number.isFinite(chunkCount)) return false
+  if(chunkIdx < 0 || chunkCount < 1 || chunkIdx >= chunkCount) return false
+  if(!Number.isFinite(k) || !Number.isFinite(n) || k < 1 || n < k) return false
+  if(!Number.isFinite(seq) || seq < 0 || seq >= n) return false
+  if(!Number.isFinite(chunkLen) || chunkLen < 1) return false
+  if(!data || !data.length) return false
+  if(rxFileId == null) rxFileId = fileId
+  if(fileId !== rxFileId) return false
+  if(rxMode === "legacy") return false
+  rxFountain = true
+  rxMode = "chunked"
+  rxChunkCount = chunkCount
+  rxDecodeCount++
+  if(!rxChunkSymbols.has(chunkIdx)) rxChunkSymbols.set(chunkIdx, new Map())
+  const map = rxChunkSymbols.get(chunkIdx)
+  rxChunkInfo.set(chunkIdx, { k, n, symLen: data.length, chunkLen })
+  if(map.has(seq)) return true
+  map.set(seq, Uint8Array.from(data))
+  tryRecoverChunk(chunkIdx)
+  return true
+}
+
 function ingestPayloadText(text){
   if(!text || typeof text !== "string") return false
+  if(text.startsWith("PC8M|")){
+    const parts = text.split("|")
+    if(parts.length < 12) return false
+    const fileId = parts[1]
+    const chunkIdx = parseInt(parts[2], 10)
+    const chunkCount = parseInt(parts[3], 10)
+    const k = parseInt(parts[4], 10)
+    const n = parseInt(parts[5], 10)
+    const size = parseInt(parts[6], 10)
+    const chunkLen = parseInt(parts[7], 10)
+    const name = b64ToUtf8(parts[8])
+    const type = b64ToUtf8(parts[9])
+    const seq = parseInt(parts[10], 10)
+    const data = b64ToBytes(parts.slice(11).join("|"))
+    if(!ingestChunkSymbol(fileId, chunkIdx, chunkCount, k, n, chunkLen, seq, data)) return false
+    rxMeta = {
+      name: (name && name.trim()) ? name.trim() : (rxMeta?.name || "recovered_file"),
+      type: (type && type.trim()) ? type.trim() : (rxMeta?.type || "application/octet-stream"),
+      size: Number.isFinite(size) ? size : (rxMeta?.size ?? null)
+    }
+    return true
+  }
   if(text.startsWith("PC7M|")){
     const parts = text.split("|")
     if(parts.length < 9) return false
@@ -1058,19 +1159,27 @@ function ingestPayloadText(text){
   return false
 }
 
+function tryRecoverChunk(chunkIdx){
+  if(rxChunkData.has(chunkIdx)) return true
+  const info = rxChunkInfo.get(chunkIdx)
+  const map = rxChunkSymbols.get(chunkIdx)
+  if(!info || !map || map.size < info.k) return false
+  const sources = decodeRsPackets(map, info.k, info.n, info.symLen)
+  if(!sources) return false
+  const merged = new Uint8Array(info.k * info.symLen)
+  for(let i = 0; i < info.k; i++) merged.set(sources[i], i * info.symLen)
+  rxChunkData.set(chunkIdx, merged.slice(0, info.chunkLen))
+  return true
+}
+
 function tryRecoverSources(){
-  if(!rxFountain || rxK == null || rxN == null || rxSymLen == null) return null
+  if(!rxFountain || rxMode !== "legacy" || rxK == null || rxN == null || rxSymLen == null) return null
   if(rxSymbols.size < rxK) return null
   return decodeRsPackets(rxSymbols, rxK, rxN, rxSymLen)
 }
 
-function tryFinishFountain(){
-  const sources = tryRecoverSources()
-  if(!sources) return false
+function finishWithBytes(finalBytes, detail){
   if(!rxMeta) rxMeta = { name: "recovered_file", type: "application/octet-stream", size: null }
-  const merged = new Uint8Array(rxK * rxSymLen)
-  for(let i = 0; i < rxK; i++) merged.set(sources[i], i * rxSymLen)
-  const finalBytes = rxMeta.size != null ? merged.slice(0, rxMeta.size) : merged
   const blob = new Blob([finalBytes], { type: rxMeta.type || "application/octet-stream" })
   const url = URL.createObjectURL(blob)
   const rawName = String(rxMeta.name || "recovered_file").trim() || "recovered_file"
@@ -1080,15 +1189,47 @@ function tryFinishFountain(){
   downloadLink.hidden = false
   progressBar.style.width = "100%"
   progressText.textContent = "Done"
-  setStatus(
-    `Recovered “${safeName}” (${finalBytes.length} bytes) · ` +
-    `${rxSymbols.size}/${rxN} QRs (need ${rxK})`
-  )
+  setStatus(`Recovered “${safeName}” (${finalBytes.length} bytes) · ${detail}`)
   try{ downloadLink.click() }catch(_){}
   rxRecovered = true
   decodeRunning = false
   stopDecodeWorkers()
   return true
+}
+
+function tryFinishChunked(){
+  if(rxChunkCount == null) return false
+  for(let i = 0; i < rxChunkCount; i++){
+    if(!rxChunkData.has(i)) tryRecoverChunk(i)
+  }
+  if(rxChunkData.size < rxChunkCount) return false
+  let totalLen = 0
+  for(let i = 0; i < rxChunkCount; i++){
+    const part = rxChunkData.get(i)
+    if(!part) return false
+    totalLen += part.length
+  }
+  const merged = new Uint8Array(totalLen)
+  let off = 0
+  for(let i = 0; i < rxChunkCount; i++){
+    const part = rxChunkData.get(i)
+    merged.set(part, off)
+    off += part.length
+  }
+  const finalBytes = rxMeta?.size != null ? merged.slice(0, rxMeta.size) : merged
+  let uniq = 0
+  for(const m of rxChunkSymbols.values()) uniq += m.size
+  return finishWithBytes(finalBytes, `${rxChunkCount} chunks · ${uniq} QRs`)
+}
+
+function tryFinishFountain(){
+  if(rxMode === "chunked") return tryFinishChunked()
+  const sources = tryRecoverSources()
+  if(!sources) return false
+  const merged = new Uint8Array(rxK * rxSymLen)
+  for(let i = 0; i < rxK; i++) merged.set(sources[i], i * rxSymLen)
+  const finalBytes = rxMeta?.size != null ? merged.slice(0, rxMeta.size) : merged
+  return finishWithBytes(finalBytes, `${rxSymbols.size}/${rxN} QRs (need ${rxK})`)
 }
 
 function tryFinish(){
@@ -1228,13 +1369,18 @@ async function decodeLoop(){
   // Progress UI every few frames only
   decodeUiTick++
   if((decodeUiTick & 3) === 0){
-    const need = rxK != null
-      ? `${rxSymbols.size}/${rxN} · need ${rxK} · q${decodeQueue.length}`
-      : `waiting · q${decodeQueue.length}`
-    progressText.textContent = need
-    if(rxFountain && rxK){
-      const pct = Math.min(99, Math.floor((Math.min(rxSymbols.size, rxK) / rxK) * 100))
+    if(rxMode === "chunked" && rxChunkCount){
+      progressText.textContent = `chunks ${rxChunkData.size}/${rxChunkCount} · q${decodeQueue.length}`
+      const pct = Math.min(99, Math.floor((rxChunkData.size / rxChunkCount) * 100))
       progressBar.style.width = pct + "%"
+    }else if(rxK != null){
+      progressText.textContent = `${rxSymbols.size}/${rxN} · need ${rxK} · q${decodeQueue.length}`
+      if(rxFountain){
+        const pct = Math.min(99, Math.floor((Math.min(rxSymbols.size, rxK) / rxK) * 100))
+        progressBar.style.width = pct + "%"
+      }
+    }else{
+      progressText.textContent = `waiting · q${decodeQueue.length}`
     }
   }
 
