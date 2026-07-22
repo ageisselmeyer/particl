@@ -62,6 +62,8 @@ let phaseStartedAt = 0
 let txRun = 0
 let meta = null
 let txRaf = 0
+let txBitmaps = [] // prerendered ImageBitmaps for fast blit
+let txStatusAt = 0
 
 function fountainRng(seed){
   let s = seed >>> 0
@@ -247,23 +249,29 @@ function getZXing(){
   return globalThis.ZXing || window.ZXing || null
 }
 
-/** Morphological dilate — closes gaps between circular modules so square-tuned finders lock. */
+/** Morphological dilate — closes gaps between circular modules (main-thread fallback). */
 function dilateImageDataInPlace(img, rad){
   const { data, width: w, height: h } = img
   const src = new Uint8ClampedArray(data)
   const r = Math.max(1, rad | 0)
   for(let y = r; y < h - r; y++){
     for(let x = r; x < w - r; x++){
+      const i = (y * w + x) * 4
+      if(src[i] < 140) continue
       let dark = false
-      for(let dy = -r; dy <= r && !dark; dy++){
-        for(let dx = -r; dx <= r; dx++){
-          if(src[((y + dy) * w + (x + dx)) * 4] < 140) dark = true
+      if(r === 1){
+        if(src[i - 4] < 140 || src[i + 4] < 140 || src[i - w * 4] < 140 || src[i + w * 4] < 140) dark = true
+        else if(src[i - w * 4 - 4] < 140 || src[i - w * 4 + 4] < 140 || src[i + w * 4 - 4] < 140 || src[i + w * 4 + 4] < 140) dark = true
+      }else{
+        for(let dy = -r; dy <= r && !dark; dy++){
+          for(let dx = -r; dx <= r; dx++){
+            if(src[((y + dy) * w + (x + dx)) * 4] < 140) dark = true
+          }
         }
       }
       if(dark){
-        const o = (y * w + x) * 4
-        data[o] = data[o + 1] = data[o + 2] = 0
-        data[o + 3] = 255
+        data[i] = data[i + 1] = data[i + 2] = 0
+        data[i + 3] = 255
       }
     }
   }
@@ -279,14 +287,14 @@ function rgbaToLuminance(img){
   return lum
 }
 
-function tryZXingOnImageData(img, w, h){
+function tryZXingOnImageData(img, w, h, tryHarder){
   const Z = getZXing()
   if(!Z || typeof Z.QRCodeReader !== "function") return null
   try{
     const src = new Z.RGBLuminanceSource(rgbaToLuminance(img), w, h)
     const bmp = new Z.BinaryBitmap(new Z.HybridBinarizer(src))
     const hints = new Map()
-    hints.set(Z.DecodeHintType.TRY_HARDER, true)
+    if(tryHarder) hints.set(Z.DecodeHintType.TRY_HARDER, true)
     hints.set(Z.DecodeHintType.POSSIBLE_FORMATS, [Z.BarcodeFormat.QR_CODE])
     const result = new Z.QRCodeReader().decode(bmp, hints)
     return result && result.getText ? result.getText() : null
@@ -300,65 +308,166 @@ function tryJsQROnImageData(jsQR, img, w, h){
   return code && code.data ? code.data : null
 }
 
-async function scanQrFromVideo(){
-  if(!video.videoWidth) return null
+// --- Decode workers + frame backlog ---
+const DECODE_QUEUE_MAX = 10
+const DECODE_WORKER_COUNT = Math.min(4, Math.max(2, (navigator.hardwareConcurrency || 4) >> 1))
+let decodeWorkers = []
+let decodeWorkersFree = []
+let decodeJobId = 0
+let decodeQueue = [] // {id, width, height, buffer, dilate, tryHarder}
+let decodeUiTick = 0
 
-  // Prefer native detector (Safari / Chromium) — sometimes handles styled QR
-  if(detector){
+function ensureDecodeWorkers(){
+  if(decodeWorkers.length) return
+  const url = new URL("decode-worker.js", import.meta.url)
+  for(let i = 0; i < DECODE_WORKER_COUNT; i++){
     try{
-      const codes = await detector.detect(video)
-      if(codes && codes.length){
-        decodeDbg.engine = "BarcodeDetector"
-        return codes[0].rawValue || null
+      const w = new Worker(url)
+      w.onmessage = onDecodeWorkerMessage
+      w.onerror = () => {
+        const idx = decodeWorkersFree.indexOf(w)
+        if(idx >= 0) decodeWorkersFree.splice(idx, 1)
       }
-    }catch(_){}
+      decodeWorkers.push(w)
+      decodeWorkersFree.push(w)
+    }catch(e){
+      console.warn("decode worker unavailable", e)
+      break
+    }
   }
+}
 
-  const jsQR = getJsQR()
-  const hasZx = !!getZXing()
-  if(!jsQR && !hasZx){
-    decodeDbg.engine = detector ? "BarcodeDetector" : "none"
-    return null
+function stopDecodeWorkers(){
+  for(const w of decodeWorkers){
+    try{ w.terminate() }catch(_){}
   }
+  decodeWorkers = []
+  decodeWorkersFree = []
+  decodeQueue = []
+}
 
+function onDecodeWorkerMessage(ev){
+  const msg = ev.data
+  if(!msg || msg.type !== "result") return
+  const w = ev.target
+  if(decodeWorkers.includes(w) && !decodeWorkersFree.includes(w)) decodeWorkersFree.push(w)
+  pumpDecodeQueue()
+  if(!decodeRunning || rxRecovered) return
+  if(msg.text) handleDecodedText(msg.text, msg.engine ? `${msg.engine}@${msg.w}d${msg.dilate}` : "worker")
+}
+
+function pumpDecodeQueue(){
+  while(decodeWorkersFree.length && decodeQueue.length){
+    const worker = decodeWorkersFree.pop()
+    const job = decodeQueue.shift()
+    try{
+      worker.postMessage({
+        type: "decode",
+        id: job.id,
+        width: job.width,
+        height: job.height,
+        dilate: job.dilate,
+        tryHarder: job.tryHarder,
+        buffer: job.buffer
+      }, [job.buffer])
+    }catch(e){
+      decodeWorkersFree.push(worker)
+      console.warn(e)
+    }
+  }
+}
+
+function enqueueDecodeJob(imgData, dilate, tryHarder){
+  // Drop oldest when backlog is full — prefer freshest frames at high TX fps
+  while(decodeQueue.length >= DECODE_QUEUE_MAX) decodeQueue.shift()
+  const copy = imgData.data.slice(0) // detachable copy
+  decodeQueue.push({
+    id: ++decodeJobId,
+    width: imgData.width,
+    height: imgData.height,
+    dilate,
+    tryHarder,
+    buffer: copy.buffer
+  })
+  pumpDecodeQueue()
+}
+
+function handleDecodedText(text, engineLabel){
+  qrHitStreak++
+  qrMissStreak = 0
+  decodeDbg.hits++
+  decodeDbg.engine = engineLabel || decodeDbg.engine
+  decodeDbg.last = text.slice(0, 48) + (text.length > 48 ? "…" : "")
+  if(text !== lastQrText){
+    lastQrText = text
+      if(ingestPayloadText(text)){
+      rxPayloadOk = true
+      if((decodeFrameNo & 7) === 0){
+        setStatus(`MDS ${rxSymbols.size}/${rxN} · need any ${rxK} · q${decodeQueue.length}`)
+      }
+      tryFinish()
+    }else{
+      decodeDbg.last = `ignored: ${text.slice(0, 40)}`
+    }
+  }else if(rxFountain && rxSymbols.size >= (rxK || 0)){
+    tryFinish()
+  }
+}
+
+/** Grab one camera frame into the backlog (non-blocking decode). */
+function captureFrameToQueue(){
+  if(!video.videoWidth) return
   const w = video.videoWidth
   const h = video.videoHeight
-  const attempts = [
-    { max: 720, crop: 1, dilate: 1 },
-    { max: 960, crop: 1, dilate: 1 },
-    { max: 640, crop: 0.82, dilate: 2 },
-    { max: 720, crop: 1, dilate: 0 }
-  ]
-  const start = decodeFrameNo % attempts.length
-  for(let n = 0; n < attempts.length; n++){
-    const a = attempts[(start + n) % attempts.length]
-    const scale = Math.min(1, a.max / Math.max(w, h))
-    const cw = Math.max(1, (w * scale * a.crop) | 0)
-    const ch = Math.max(1, (h * scale * a.crop) | 0)
-    const sx = ((w - w * a.crop) / 2) | 0
-    const sy = ((h - h * a.crop) / 2) | 0
-    ensureScanCanvas(cw, ch)
-    scanCtx.drawImage(video, sx, sy, w * a.crop, h * a.crop, 0, 0, cw, ch)
-    const img = scanCtx.getImageData(0, 0, cw, ch)
-    if(a.dilate > 0) dilateImageDataInPlace(img, a.dilate)
+  // Single lean capture size — workers try dilate variants via alternating jobs
+  const max = 720
+  const scale = Math.min(1, max / Math.max(w, h))
+  const cw = Math.max(1, (w * scale) | 0)
+  const ch = Math.max(1, (h * scale) | 0)
+  ensureScanCanvas(cw, ch)
+  scanCtx.drawImage(video, 0, 0, w, h, 0, 0, cw, ch)
+  const img = scanCtx.getImageData(0, 0, cw, ch)
+  const variant = decodeFrameNo % 3
+  const dilate = variant === 0 ? 1 : (variant === 1 ? 2 : 0)
+  const tryHarder = qrMissStreak > 8 || variant === 1
+  enqueueDecodeJob(img, dilate, tryHarder)
+}
 
-    if(hasZx){
-      const zx = tryZXingOnImageData(img, cw, ch)
-      if(zx){
-        decodeDbg.engine = `ZXing@${cw}d${a.dilate}`
-        return zx
-      }
+async function scanNativeDetector(){
+  if(!detector || !video.videoWidth) return null
+  try{
+    const codes = await detector.detect(video)
+    if(codes && codes.length){
+      decodeDbg.engine = "BarcodeDetector"
+      return codes[0].rawValue || null
     }
-    if(jsQR){
-      const data = tryJsQROnImageData(jsQR, img, cw, ch)
-      if(data){
-        decodeDbg.engine = `jsQR@${cw}d${a.dilate}`
-        return data
-      }
-    }
+  }catch(_){}
+  return null
+}
+
+/** Main-thread fallback when workers unavailable. */
+function scanQrOnMainThread(){
+  const jsQR = getJsQR()
+  const hasZx = !!getZXing()
+  if(!jsQR && !hasZx) return null
+  const w = video.videoWidth
+  const h = video.videoHeight
+  if(!w) return null
+  const scale = Math.min(1, 640 / Math.max(w, h))
+  const cw = Math.max(1, (w * scale) | 0)
+  const ch = Math.max(1, (h * scale) | 0)
+  ensureScanCanvas(cw, ch)
+  scanCtx.drawImage(video, 0, 0, w, h, 0, 0, cw, ch)
+  const img = scanCtx.getImageData(0, 0, cw, ch)
+  dilateImageDataInPlace(img, 1)
+  if(hasZx){
+    const zx = tryZXingOnImageData(img, cw, ch, qrMissStreak > 5)
+    if(zx){ decodeDbg.engine = `ZXing@${cw}`; return zx }
   }
-
-  decodeDbg.engine = hasZx ? "ZXing" : (jsQR ? "jsQR" : (detector ? "BarcodeDetector" : "none"))
+  if(jsQR){
+    const data = tryJsQROnImageData(jsQR, img, cw, ch)
+    if(data){ decodeDbg.engine = `jsQR@${cw}`; return data }
+  }
   return null
 }
 
@@ -524,16 +633,47 @@ function paintParticleCloud(now){
 }
 
 function drawQrToCanvas(text){
-  // Prefer classic painter (proven on device). Never use white createDataURL.
   if(typeof window.__particlPaintCloud === "function"){
-    const ok = window.__particlPaintCloud(text)
-    if(ok){
-      try{ spawnCloudFromText(text) }catch(_){}
-      return
-    }
+    if(window.__particlPaintCloud(text)) return
   }
   spawnCloudFromText(text)
   paintParticleCloud(performance.now())
+}
+
+function blitTxBitmap(index){
+  const bmp = txBitmaps[index]
+  if(!bmp || !cloudCanvas) return false
+  if(cloudCanvas.width !== bmp.width || cloudCanvas.height !== bmp.height){
+    cloudCanvas.width = bmp.width
+    cloudCanvas.height = bmp.height
+  }
+  const ctx = cloudCanvas.getContext("2d")
+  if(!ctx) return false
+  ctx.drawImage(bmp, 0, 0)
+  return true
+}
+
+function clearTxBitmaps(){
+  for(const b of txBitmaps){
+    try{ b.close() }catch(_){}
+  }
+  txBitmaps = []
+}
+
+async function prerenderTxFrames(texts){
+  clearTxBitmaps()
+  if(typeof window.__particlPaintCloud !== "function") return false
+  setStatus(`Rendering ${texts.length} QR frames…`)
+  for(let i = 0; i < texts.length; i++){
+    window.__particlPaintCloud(texts[i])
+    const bmp = await createImageBitmap(cloudCanvas)
+    txBitmaps.push(bmp)
+    if((i & 3) === 0){
+      setStatus(`Rendering QR frames… ${i + 1}/${texts.length}`)
+      await new Promise((r) => requestAnimationFrame(r))
+    }
+  }
+  return txBitmaps.length === texts.length
 }
 
 function showQrUi(){
@@ -657,13 +797,11 @@ function encodeFile(file){
         size: bytes.length
       }
       frames = buildFrames(bytes, meta)
-      // Lock QR version to the longest frame so module grid / finders stay fixed
       const qrcode = getQrCode()
       const longest = frames.reduce((a, b) => (a.length >= b.length ? a : b), "")
       const probe = qrcode(0, QR_ECC)
       probe.addData(longest, "Byte")
       probe.make()
-      // typeNumber is private; derive from modules: n = 4*type + 17
       window.__particlQrType = Math.round((probe.getModuleCount() - 17) / 4)
 
       frameIndex = 0
@@ -671,7 +809,16 @@ function encodeFile(file){
       txRun++
       modeButtons.classList.add("is-hidden")
       showQrUi()
-      drawQrToCanvas(frames[0])
+
+      const ok = await prerenderTxFrames(frames)
+      if(!ok){
+        // Fallback: live paint each frame
+        clearTxBitmaps()
+        drawQrToCanvas(frames[0])
+      }else{
+        blitTxBitmap(0)
+      }
+
       if(txRaf) cancelAnimationFrame(txRaf)
       const run = txRun
       const loop = (now) => {
@@ -706,10 +853,11 @@ function tickTx(now){
     changed = true
   }
   if(changed){
-    drawQrToCanvas(frames[frameIndex])
+    if(txBitmaps.length === frames.length) blitTxBitmap(frameIndex)
+    else drawQrToCanvas(frames[frameIndex])
   }
-  if((tickTx._lastStatus | 0) !== frameIndex){
-    tickTx._lastStatus = frameIndex
+  if(changed && (now - txStatusAt > 200)){
+    txStatusAt = now
     setStatus(`Cloud frame ${frameIndex + 1} / ${frames.length} · “${meta?.name || "file"}”`)
   }
 }
@@ -921,8 +1069,8 @@ function tryFinishFountain(){
   )
   try{ downloadLink.click() }catch(_){}
   rxRecovered = true
-  updateDecodeMeters()
   decodeRunning = false
+  stopDecodeWorkers()
   return true
 }
 
@@ -978,6 +1126,7 @@ async function startDecoder(){
   }
   txRun = 0
   frames = []
+  clearTxBitmaps()
   if(txRaf) cancelAnimationFrame(txRaf)
   modeButtons.classList.add("is-hidden")
   canvasWrap.style.display = "none"
@@ -989,21 +1138,20 @@ async function startDecoder(){
   decodeFrameNo = 0
   progressBar.style.width = "0%"
   progressText.textContent = "QR: 0"
-  if(decodeMetersEl) decodeMetersEl.hidden = false
-  if(decodeDebugEl){
-    decodeDebugEl.hidden = false
-    decodeDbg.last = "decoder started"
-    updateDecodeDebug()
-  }
-  updateDecodeMeters()
+  if(decodeMetersEl) decodeMetersEl.hidden = true
+  if(decodeDebugEl) decodeDebugEl.hidden = true
+  lastQrText = ""
+  qrHitStreak = 0
+  qrMissStreak = 0
+  ensureDecodeWorkers()
 
   let captureSettings = {}
   try{
     const stream = await navigator.mediaDevices.getUserMedia({
       video: {
         facingMode: { ideal: "environment" },
-        width: { ideal: 1920, min: 1280 },
-        height: { ideal: 1080, min: 720 },
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
         frameRate: { ideal: 30 }
       },
       audio: false
@@ -1022,6 +1170,9 @@ async function startDecoder(){
       captureSettings = await tuneDecoderCamera(stream)
     }catch(__){
       setStatus("Could not access camera.")
+      modeButtons.classList.remove("is-hidden")
+      canvasWrap.style.display = ""
+      videoWrap.hidden = true
       return
     }
   }
@@ -1034,7 +1185,8 @@ async function startDecoder(){
   decodeRunning = true
   const showCaptureStatus = () => {
     const capLabel = formatCaptureLabel(captureSettings, video.videoWidth, video.videoHeight)
-    setStatus(`Point at the particle cloud on the Mac · fill the view · ${capLabel}.`)
+    const wlab = decodeWorkers.length ? `${decodeWorkers.length} workers` : "main-thread"
+    setStatus(`Decode · ${wlab} · ${capLabel}`)
   }
   showCaptureStatus()
   video.addEventListener("loadedmetadata", () => {
@@ -1046,7 +1198,7 @@ async function startDecoder(){
 }
 
 async function decodeLoop(){
-  if(!decodeRunning) return
+  if(!decodeRunning || rxRecovered) return
   decodeFrameNo++
   const now = performance.now()
   if(decodeDbgLastT){
@@ -1055,43 +1207,44 @@ async function decodeLoop(){
     decodeDbg.fps = decodeDbgFpsEma.toFixed(1)
   }
   decodeDbgLastT = now
-  if(video.videoWidth) decodeDbg.video = `${video.videoWidth}x${video.videoHeight}`
 
-  const need = rxK != null
-    ? `${rxSymbols.size}/${rxN} unique · need any ${rxK}`
-    : "waiting for first QR"
-  progressText.textContent = need
-  if(rxFountain && rxK){
-    const pct = Math.min(99, Math.floor((Math.min(rxSymbols.size, rxK) / rxK) * 100))
-    progressBar.style.width = pct + "%"
-  }
-
-  const text = await scanQrFromVideo()
-  if(text){
-    qrHitStreak++
-    qrMissStreak = 0
-    decodeDbg.hits++
-    decodeDbg.last = text.slice(0, 48) + (text.length > 48 ? "…" : "")
-    if(text !== lastQrText){
-      lastQrText = text
-      if(ingestPayloadText(text)){
-        rxPayloadOk = true
-        setStatus(`MDS ${rxSymbols.size}/${rxN} · need any ${rxK} · misses OK`)
-        if(tryFinish()) return
-      }else{
-        decodeDbg.last = `ignored: ${text.slice(0, 40)}`
-      }
-    }else if(rxFountain && rxSymbols.size >= (rxK || 0)){
-      if(tryFinish()) return
+  // Progress UI every few frames only
+  decodeUiTick++
+  if((decodeUiTick & 3) === 0){
+    const need = rxK != null
+      ? `${rxSymbols.size}/${rxN} · need ${rxK} · q${decodeQueue.length}`
+      : `waiting · q${decodeQueue.length}`
+    progressText.textContent = need
+    if(rxFountain && rxK){
+      const pct = Math.min(99, Math.floor((Math.min(rxSymbols.size, rxK) / rxK) * 100))
+      progressBar.style.width = pct + "%"
     }
-  }else{
-    qrHitStreak = 0
-    qrMissStreak++
-    if(qrMissStreak % 30 === 0) decodeDbg.last = "no QR in view"
   }
 
-  updateDecodeMeters()
-  updateDecodeDebug()
+  // Native detector occasionally (cheap on Safari) — don't block capture
+  if(detector && (decodeFrameNo % 4) === 0){
+    const nativeText = await scanNativeDetector()
+    if(nativeText) handleDecodedText(nativeText, "BarcodeDetector")
+    if(rxRecovered) return
+  }
+
+  // Capture into backlog; workers decode in parallel
+  if(decodeWorkers.length){
+    captureFrameToQueue()
+  }else{
+    const text = scanQrOnMainThread()
+    if(text) handleDecodedText(text, decodeDbg.engine)
+    else{
+      qrHitStreak = 0
+      qrMissStreak++
+    }
+    if(rxRecovered) return
+  }
+
+  // Miss accounting when workers are silent is approximate; bump on empty queue + no recent hit
+  if(decodeWorkers.length && decodeQueue.length === 0 && decodeWorkersFree.length === decodeWorkers.length){
+    if(qrHitStreak === 0) qrMissStreak++
+  }
 
   if(video.requestVideoFrameCallback){
     video.requestVideoFrameCallback(() => decodeLoop())

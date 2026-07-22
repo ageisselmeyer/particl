@@ -8,12 +8,12 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>PartiCl</title>
-<link rel="stylesheet" href="styles.css?v=154740">
+<link rel="stylesheet" href="styles.css?v=154780">
 </head>
 <body>
   <header>
     <h1>PartiCl</h1>
-    <p class="tagline">Dot QR · MDS · <span id="buildId">154770</span></p>
+    <p class="tagline">Dot QR · MDS · <span id="buildId">154780</span></p>
   </header>
 
   <input type="file" id="fileInput" hidden>
@@ -95,8 +95,7 @@
   <script src="vendor/jsqr/jsQR.js"></script>
   <script src="vendor/zxing/zxing.min.js"></script>
   <script>
-    // White square · square finder corners · black dots for every data module (full square).
-    // Optional window.__particlQrType (1–40) locks version so finders don't jump between frames.
+    // White square · all modules as black dots. Path2D batch fill for faster TX prerender.
     window.__particlIdlePayload =
       "PartiCl QR ready - Encode a file | pad:" + Array(181).join("x");
     window.__particlPaintCloud = function(text){
@@ -125,9 +124,12 @@
       c.style.display = "block";
       c.style.opacity = "1";
       c.style.background = "#fff";
-      c.width = size;
-      c.height = size;
-      var ctx = c.getContext("2d");
+      if(c.width !== size || c.height !== size){
+        c.width = size;
+        c.height = size;
+      }
+      var ctx = c.getContext("2d", { alpha: false });
+      if(!ctx) ctx = c.getContext("2d");
       if(!ctx) return false;
 
       ctx.fillStyle = "#ffffff";
@@ -135,24 +137,30 @@
 
       var origin = quiet * cell;
       var dotRad = cell * 0.48;
-
+      var path = typeof Path2D !== "undefined" ? new Path2D() : null;
       ctx.fillStyle = "#000000";
       for(var r = 0; r < n; r++){
         for(var col = 0; col < n; col++){
           if(!qr.isDark(r, col)) continue;
           var x = origin + (col + 0.5) * cell;
           var y = origin + (r + 0.5) * cell;
-          ctx.beginPath();
-          ctx.arc(x, y, dotRad, 0, Math.PI * 2);
-          ctx.fill();
+          if(path){
+            path.moveTo(x + dotRad, y);
+            path.arc(x, y, dotRad, 0, Math.PI * 2);
+          }else{
+            ctx.beginPath();
+            ctx.arc(x, y, dotRad, 0, Math.PI * 2);
+            ctx.fill();
+          }
         }
       }
+      if(path) ctx.fill(path);
       return true;
     };
     window.__particlPaintCloud(window.__particlIdlePayload);
     var st = document.getElementById("status");
     if(st) st.textContent = "Boot dot-QR · loading module…";
   </script>
-  <script type="module" src="app-qr.js?v=154770"></script>
+  <script type="module" src="app-qr.js?v=154780"></script>
 </body>
 </html>
