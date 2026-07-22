@@ -50,7 +50,7 @@ function setStatus(msg){
 const TARGET_K = 10
 const TARGET_N = 20
 const MAX_SYMBOL_BYTES = 220
-const FRAME_HOLD_MS = 750
+const FRAME_HOLD_MS = 75
 const QR_ECC = "Q"
 const QR_CELL = 10
 const QR_MARGIN = 8
