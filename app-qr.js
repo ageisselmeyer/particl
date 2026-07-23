@@ -50,7 +50,7 @@ function setStatus(msg){
 const TARGET_K = 10
 const TARGET_N = 20
 const MAX_N = 40 // hard cap — optical TX cannot usefully cycle thousands of frames
-const MAX_SYMBOL_BYTES = 800 // larger QR capacity; keeps n small for bigger files
+const MAX_SYMBOL_BYTES = 220 // match f503416 QR size (~v18); larger values → denser codes
 const PRERENDER_MAX = 48 // only prerender small transfers (bitmaps thrash past this)
 const FRAME_HOLD_MS = 75
 const QR_ECC = "Q"
