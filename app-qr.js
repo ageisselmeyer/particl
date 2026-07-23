@@ -49,11 +49,16 @@ function setStatus(msg){
   statusEl.textContent = msg || ""
 }
 
-// ~2KB file → 20 QR frames, any 10 recover (Reed–Solomon MDS across packets).
-const TARGET_K = 10
-const TARGET_N = 20
-const MAX_N = 40 // hard cap — optical TX cannot usefully cycle thousands of frames
-const MAX_SYMBOL_BYTES = 220 // match f503416 QR size (~v18); larger values → denser codes
+// Per-generation Reed–Solomon MDS over GF(256) (n ≤ 255).
+// Any ~80% of a generation’s packets recover that generation — not a global LT fountain,
+// but the strongest MDS we can do per QR-sized packet. Large generations ⇒ fewer endgame stalls.
+const RS_RATE = 0.8
+const GEN_N = 255
+const GEN_K = Math.floor(GEN_N * RS_RATE) // 204 — need any 204 of 255
+const MAX_SYMBOL_BYTES = 220 // match f503416 QR size (~v18)
+const CHUNK_PAYLOAD = GEN_K * MAX_SYMBOL_BYTES // bytes of file data per generation
+const TARGET_K = GEN_K // legacy alias used in a few progress fallbacks
+const TARGET_N = GEN_N
 const PRERENDER_MAX = 48 // only prerender small transfers (bitmaps thrash past this)
 const FRAME_HOLD_MS = 75
 const QR_ECC = "Q"
@@ -877,18 +882,17 @@ function showQrUi(){
   videoWrap.hidden = true
 }
 
-function planCoding(fileLen){
-  let k = TARGET_K
-  let n = TARGET_N
-  let sym = Math.max(1, Math.ceil(fileLen / k))
-  while(sym > MAX_SYMBOL_BYTES && n < MAX_N){
-    k += 1
-    n = Math.min(MAX_N, k * 2)
-    if(n >= MAX_N){
-      k = Math.floor(MAX_N / 2)
-      n = MAX_N
-    }
-    sym = Math.max(1, Math.ceil(fileLen / k))
+/** Plan one MDS generation: any k of n packets (≈80%) recover byteLen bytes. */
+function planCoding(byteLen){
+  let k = Math.max(1, Math.ceil(byteLen / MAX_SYMBOL_BYTES))
+  k = Math.min(GEN_K, k)
+  let n = Math.min(GEN_N, Math.max(k + 1, Math.ceil(k / RS_RATE)))
+  let sym = Math.max(1, Math.ceil(byteLen / k))
+  // Keep QR payload bounded if rounding pushed sym up
+  while(sym > MAX_SYMBOL_BYTES && k < GEN_K){
+    k++
+    n = Math.min(GEN_N, Math.max(k + 1, Math.ceil(k / RS_RATE)))
+    sym = Math.max(1, Math.ceil(byteLen / k))
   }
   return { k, n, sym, nsym: n - k }
 }
@@ -936,9 +940,6 @@ function decodeRsPackets(symbolMap, k, n, symLen){
   }
   return sources
 }
-
-/** Bytes of file data per MDS burst (keeps each burst ≤ TARGET_N QRs). */
-const CHUNK_PAYLOAD = TARGET_K * MAX_SYMBOL_BYTES
 
 function appendMdsBurst(out, fileId, fileMeta, chunkIdx, chunkCount, chunkBytes){
   const { k, n, sym } = planCoding(chunkBytes.length)
@@ -998,8 +999,9 @@ function buildFrames(fileBytes, fileMeta){
     }
   }
   out._fountain = {
-    k: TARGET_K,
-    n: TARGET_N,
+    k: GEN_K,
+    n: GEN_N,
+    rate: RS_RATE,
     chunks: chunkCount,
     total: out.length,
     need,
@@ -1066,9 +1068,10 @@ function encodeFile(file){
       txRaf = requestAnimationFrame(loop)
       const ft = frames._fountain || {}
       const mins = ((frames.length * FRAME_HOLD_MS) / 60000).toFixed(1)
+      const pct = Math.round((ft.rate || RS_RATE) * 100)
       setStatus(
-        `QR · “${meta.name}” · ${ft.chunks || 1} chunks · ${frames.length} frames` +
-        ` (~${mins}m/loop) · need ~${ft.need} unique · point camera here`
+        `MDS · “${meta.name}” · ${ft.chunks || 1} gens · any ${pct}% · ` +
+        `${frames.length} frames (~${mins}m/loop) · need ~${ft.need} · point camera here`
       )
     }catch(err){
       console.error(err)
