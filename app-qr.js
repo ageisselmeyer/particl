@@ -19,6 +19,9 @@ const downloadLink = document.getElementById("download")
 const progressWrap = document.getElementById("decodeProgressWrap")
 const progressBar = document.getElementById("decodeProgressBar")
 const progressText = document.getElementById("decodeProgressText")
+const decodePipeFrames = document.getElementById("decodePipeFrames")
+const decodePipeWorkers = document.getElementById("decodePipeWorkers")
+const decodePipeBalance = document.getElementById("decodePipeBalance")
 const decodeDebugEl = document.getElementById("decodeDebug")
 const decodeMetersEl = document.getElementById("decodeMeters")
 const meterAlignFill = document.getElementById("meterAlignFill")
@@ -320,6 +323,53 @@ let decodeJobId = 0
 let decodeQueue = [] // {id, width, height, buffer, dilate, tryHarder}
 let decodeUiTick = 0
 
+/** Camera capture vs worker decode throughput (rolling). */
+let pipeCaptureCount = 0
+let pipeDecodeDone = 0
+let pipeDecodeHit = 0
+let pipeDropped = 0
+let pipeWindowStart = 0
+let pipeWinCapture = 0
+let pipeWinDecode = 0
+let pipeWinHit = 0
+let pipeWinDrop = 0
+let pipeCamFps = 0
+let pipeDecodeFps = 0
+let pipeHitFps = 0
+
+function resetPipelineStats(){
+  pipeCaptureCount = 0
+  pipeDecodeDone = 0
+  pipeDecodeHit = 0
+  pipeDropped = 0
+  pipeWindowStart = performance.now()
+  pipeWinCapture = 0
+  pipeWinDecode = 0
+  pipeWinHit = 0
+  pipeWinDrop = 0
+  pipeCamFps = 0
+  pipeDecodeFps = 0
+  pipeHitFps = 0
+}
+
+function tickPipelineWindow(now){
+  const elapsed = now - pipeWindowStart
+  if(elapsed < 400) return
+  const sec = elapsed / 1000
+  pipeCamFps = pipeWinCapture / sec
+  pipeDecodeFps = pipeWinDecode / sec
+  pipeHitFps = pipeWinHit / sec
+  pipeWindowStart = now
+  pipeWinCapture = 0
+  pipeWinDecode = 0
+  pipeWinHit = 0
+  pipeWinDrop = 0
+}
+
+function workersBusy(){
+  return Math.max(0, decodeWorkers.length - decodeWorkersFree.length)
+}
+
 function ensureDecodeWorkers(){
   if(decodeWorkers.length) return
   const url = new URL("decode-worker.js", import.meta.url)
@@ -354,9 +404,16 @@ function onDecodeWorkerMessage(ev){
   if(!msg || msg.type !== "result") return
   const w = ev.target
   if(decodeWorkers.includes(w) && !decodeWorkersFree.includes(w)) decodeWorkersFree.push(w)
+  pipeDecodeDone++
+  pipeWinDecode++
+  if(msg.text){
+    pipeDecodeHit++
+    pipeWinHit++
+  }
   pumpDecodeQueue()
   if(!decodeRunning || rxRecovered) return
   if(msg.text) handleDecodedText(msg.text, msg.engine ? `${msg.engine}@${msg.w}d${msg.dilate}` : "worker")
+  else updateDecodeProgressUi(false)
 }
 
 function pumpDecodeQueue(){
@@ -382,7 +439,11 @@ function pumpDecodeQueue(){
 
 function enqueueDecodeJob(imgData, dilate, tryHarder){
   // Drop oldest when backlog is full — prefer freshest frames at high TX fps
-  while(decodeQueue.length >= DECODE_QUEUE_MAX) decodeQueue.shift()
+  while(decodeQueue.length >= DECODE_QUEUE_MAX){
+    decodeQueue.shift()
+    pipeDropped++
+    pipeWinDrop++
+  }
   const copy = imgData.data.slice(0) // detachable copy
   decodeQueue.push({
     id: ++decodeJobId,
@@ -395,15 +456,111 @@ function enqueueDecodeJob(imgData, dilate, tryHarder){
   pumpDecodeQueue()
 }
 
-function rxStatusLine(){
+/** Unique QR symbols held + how many are still needed to finish. */
+function rxQrHaveNeed(){
   if(rxMode === "chunked"){
-    const done = rxChunkData.size
-    const total = rxChunkCount ?? "?"
-    let uniq = 0
-    for(const m of rxChunkSymbols.values()) uniq += m.size
-    return `MDS chunks ${done}/${total} · ${uniq} QRs · q${decodeQueue.length}`
+    let have = 0
+    let useful = 0
+    for(const [idx, map] of rxChunkSymbols){
+      const info = rxChunkInfo.get(idx)
+      const k = info?.k || TARGET_K
+      have += map.size
+      useful += Math.min(map.size, k)
+    }
+    let need = null
+    if(rxChunkCount != null){
+      need = 0
+      for(let i = 0; i < rxChunkCount; i++){
+        const info = rxChunkInfo.get(i)
+        need += info?.k || TARGET_K
+      }
+    }
+    return { have, useful, need, totalTx: null }
   }
-  return `MDS ${rxSymbols.size}/${rxN} · need any ${rxK} · q${decodeQueue.length}`
+  if(rxFountain && rxK != null){
+    return {
+      have: rxSymbols.size,
+      useful: Math.min(rxSymbols.size, rxK),
+      need: rxK,
+      totalTx: rxN
+    }
+  }
+  return { have: 0, useful: 0, need: null, totalTx: null }
+}
+
+function balanceLabel(){
+  const q = decodeQueue.length
+  const busy = workersBusy()
+  const total = decodeWorkers.length
+  const cam = pipeCamFps
+  const dec = pipeDecodeFps
+  const hit = pipeHitFps
+  let balance = "warming up"
+  if(cam > 0.5 || dec > 0.5){
+    if(pipeWinDrop > 0 || q >= DECODE_QUEUE_MAX - 1){
+      balance = "camera ahead · workers saturated (dropping frames)"
+    }else if(q === 0 && busy === 0 && cam > dec * 1.2){
+      balance = "workers idle · waiting on QR lock"
+    }else if(dec > 0 && cam > 0 && cam > dec * 1.25){
+      balance = "camera faster than decode"
+    }else if(dec > 0 && cam > 0 && dec > cam * 1.25){
+      balance = "decode keeping up / ahead of camera"
+    }else{
+      balance = "camera ↔ decode matched"
+    }
+  }
+  const hitPct = dec > 0.1 ? Math.round((hit / Math.max(dec, 0.01)) * 100) : 0
+  return {
+    balance,
+    detail: `cam ${cam.toFixed(0)}/s · decode ${dec.toFixed(0)}/s · QR-hit ${hit.toFixed(0)}/s (${hitPct}%) · drops ${pipeDropped}`
+  }
+}
+
+function updateDecodeProgressUi(forceBar){
+  const now = performance.now()
+  tickPipelineWindow(now)
+  const { have, useful, need } = rxQrHaveNeed()
+  const needLabel = need != null ? String(need) : "?"
+  if(progressText){
+    progressText.textContent = rxRecovered
+      ? `Done · ${have} unique QR frames`
+      : `QR frames ${useful}/${needLabel} needed · ${have} unique held`
+  }
+  if(progressBar && (forceBar || need != null)){
+    if(rxRecovered){
+      progressBar.style.width = "100%"
+    }else if(need != null && need > 0){
+      const pct = Math.min(99, Math.floor((useful / need) * 100))
+      progressBar.style.width = pct + "%"
+    }else if(have > 0){
+      progressBar.style.width = Math.min(8, have) + "%"
+    }
+  }
+
+  const q = decodeQueue.length
+  const busy = workersBusy()
+  const totalW = decodeWorkers.length
+  const inFlight = q + busy
+  if(decodePipeFrames){
+    decodePipeFrames.textContent =
+      `Pipeline: ${inFlight} frame${inFlight === 1 ? "" : "s"} in flight` +
+      ` (${q} queued · ${busy} decoding)`
+  }
+  if(decodePipeWorkers){
+    decodePipeWorkers.textContent = totalW
+      ? `Workers: ${busy} busy / ${totalW} total · ${decodeWorkersFree.length} free`
+      : `Workers: none · main-thread decode`
+  }
+  if(decodePipeBalance){
+    const b = balanceLabel()
+    decodePipeBalance.textContent = `${b.balance} · ${b.detail}`
+  }
+}
+
+function rxStatusLine(){
+  const { have, useful, need } = rxQrHaveNeed()
+  const needLabel = need != null ? String(need) : "?"
+  return `QR ${useful}/${needLabel} needed · ${have} unique · q${decodeQueue.length}`
 }
 
 function handleDecodedText(text, engineLabel){
@@ -417,12 +574,17 @@ function handleDecodedText(text, engineLabel){
     if(ingestPayloadText(text)){
       rxPayloadOk = true
       setStatus(rxStatusLine())
+      updateDecodeProgressUi(true)
       tryFinish()
     }else{
       decodeDbg.last = `ignored: ${text.slice(0, 40)}`
+      updateDecodeProgressUi(false)
     }
   }else if(rxFountain){
+    updateDecodeProgressUi(false)
     tryFinish()
+  }else{
+    updateDecodeProgressUi(false)
   }
 }
 
@@ -442,6 +604,8 @@ function captureFrameToQueue(){
   const variant = decodeFrameNo % 3
   const dilate = variant === 0 ? 1 : (variant === 1 ? 2 : 0)
   const tryHarder = qrMissStreak > 8 || variant === 1
+  pipeCaptureCount++
+  pipeWinCapture++
   enqueueDecodeJob(img, dilate, tryHarder)
 }
 
@@ -997,19 +1161,12 @@ function updateDecodeMeters(){
   let crcScore = 0
   let crcLabel = "waiting"
   if(rxRecovered || rxPayloadOk){
-    if(rxMode === "chunked"){
-      const need = Math.max(1, rxChunkCount || 1)
-      crcScore = rxRecovered ? 100 : Math.min(95, Math.round((rxChunkData.size / need) * 95))
-      crcLabel = rxRecovered
-        ? "recovered"
-        : `chunks ${rxChunkData.size}/${rxChunkCount ?? "?"}`
-    }else{
-      const need = Math.max(1, rxK || 1)
-      crcScore = rxRecovered ? 100 : Math.min(95, Math.round((rxSymbols.size / need) * 95))
-      crcLabel = rxRecovered
-        ? "recovered"
-        : `${rxSymbols.size}/${rxK} of ${rxN ?? "?"}`
-    }
+    const { useful, need } = rxQrHaveNeed()
+    const needN = Math.max(1, need || 1)
+    crcScore = rxRecovered ? 100 : Math.min(95, Math.round((useful / needN) * 95))
+    crcLabel = rxRecovered
+      ? "recovered"
+      : `QR ${useful}/${need ?? "?"}`
   }
   decodeQuality.crcScore = crcScore
   if(crcScore > decodeQuality.crcPeak) decodeQuality.crcPeak = crcScore
@@ -1023,12 +1180,12 @@ function updateDecodeMeters(){
 
 function updateDecodeDebug(){
   if(!decodeDebugEl) return
+  const { have, useful, need } = rxQrHaveNeed()
   decodeDebugEl.textContent = [
     `frame ${decodeFrameNo} · ${decodeDbg.video} · ~${decodeDbg.fps} fps`,
     `engine ${decodeDbg.engine} · hits ${decodeDbg.hits} · streak ${qrHitStreak}`,
-    `mds ${rxMode === "chunked"
-      ? `chunks ${rxChunkData.size}/${rxChunkCount ?? "?"} · scans=${rxDecodeCount}`
-      : `unique=${rxSymbols.size}/${rxN ?? "?"} · need ${rxK ?? "?"} · scans=${rxDecodeCount}`}`,
+    `QR ${useful}/${need ?? "?"} needed · ${have} unique · scans=${rxDecodeCount}`,
+    `pipe q=${decodeQueue.length} busy=${workersBusy()}/${decodeWorkers.length}`,
     `last: ${decodeDbg.last}`
   ].join("\n")
 }
@@ -1187,9 +1344,11 @@ function finishWithBytes(finalBytes, detail){
   downloadLink.href = url
   downloadLink.download = safeName
   downloadLink.hidden = false
+  const { have, useful, need } = rxQrHaveNeed()
   progressBar.style.width = "100%"
-  progressText.textContent = "Done"
-  setStatus(`Recovered “${safeName}” (${finalBytes.length} bytes) · ${detail}`)
+  progressText.textContent = `Done · ${useful}/${need ?? useful} QR frames`
+  setStatus(`Recovered “${safeName}” (${finalBytes.length} bytes) · ${have} unique · ${detail}`)
+  updateDecodeProgressUi(true)
   try{ downloadLink.click() }catch(_){}
   rxRecovered = true
   decodeRunning = false
@@ -1293,15 +1452,20 @@ async function startDecoder(){
   downloadLink.hidden = true
   resetRxState()
   resetDecodeQuality()
+  resetPipelineStats()
   decodeFrameNo = 0
   progressBar.style.width = "0%"
-  progressText.textContent = "QR: 0"
+  progressText.textContent = "QR frames 0/? needed"
+  if(decodePipeFrames) decodePipeFrames.textContent = "Pipeline: —"
+  if(decodePipeWorkers) decodePipeWorkers.textContent = "Workers: —"
+  if(decodePipeBalance) decodePipeBalance.textContent = "Balance: —"
   if(decodeMetersEl) decodeMetersEl.hidden = true
   if(decodeDebugEl) decodeDebugEl.hidden = true
   lastQrText = ""
   qrHitStreak = 0
   qrMissStreak = 0
   ensureDecodeWorkers()
+  updateDecodeProgressUi(false)
 
   let captureSettings = {}
   try{
@@ -1366,23 +1530,9 @@ async function decodeLoop(){
   }
   decodeDbgLastT = now
 
-  // Progress UI every few frames only
+  // Progress + pipeline UI — refresh every loop so workers/queue stay live
   decodeUiTick++
-  if((decodeUiTick & 3) === 0){
-    if(rxMode === "chunked" && rxChunkCount){
-      progressText.textContent = `chunks ${rxChunkData.size}/${rxChunkCount} · q${decodeQueue.length}`
-      const pct = Math.min(99, Math.floor((rxChunkData.size / rxChunkCount) * 100))
-      progressBar.style.width = pct + "%"
-    }else if(rxK != null){
-      progressText.textContent = `${rxSymbols.size}/${rxN} · need ${rxK} · q${decodeQueue.length}`
-      if(rxFountain){
-        const pct = Math.min(99, Math.floor((Math.min(rxSymbols.size, rxK) / rxK) * 100))
-        progressBar.style.width = pct + "%"
-      }
-    }else{
-      progressText.textContent = `waiting · q${decodeQueue.length}`
-    }
-  }
+  updateDecodeProgressUi((decodeUiTick & 3) === 0)
 
   // Native detector occasionally (cheap on Safari) — don't block capture
   if(detector && (decodeFrameNo % 4) === 0){
