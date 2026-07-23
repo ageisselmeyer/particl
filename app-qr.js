@@ -471,12 +471,21 @@ function enqueueDecodeJob(imgData, dilate, tryHarder){
 }
 
 /** Unique QR symbols held + how many are still needed to finish. */
+// Fountain usually recovers around ~85% of K known blocks (observed finish ~620/728).
+const LT_NEED_FRAC = 0.85
+const LT_NEED_PCT = Math.round(LT_NEED_FRAC * 100)
+
 function rxQrHaveNeed(){
   if(rxMode === "lt"){
+    const K = rxLtK || 0
+    const useful = rxLtKnownCount
+    const need = K > 0 ? Math.ceil(K * LT_NEED_FRAC) : null
     return {
       have: rxLtMap.size,
-      useful: rxLtKnownCount,
-      need: rxLtK,
+      useful,
+      need,
+      total: K || null,
+      needPct: LT_NEED_PCT,
       totalTx: null
     }
   }
@@ -497,17 +506,19 @@ function rxQrHaveNeed(){
         need += info?.k || TARGET_K
       }
     }
-    return { have, useful, need, totalTx: null }
+    return { have, useful, need, total: need, needPct: 100, totalTx: null }
   }
   if(rxFountain && rxK != null){
     return {
       have: rxSymbols.size,
       useful: Math.min(rxSymbols.size, rxK),
       need: rxK,
+      total: rxK,
+      needPct: 100,
       totalTx: rxN
     }
   }
-  return { have: 0, useful: 0, need: null, totalTx: null }
+  return { have: 0, useful: 0, need: null, total: null, needPct: null, totalTx: null }
 }
 
 function padN(n, w){
@@ -542,7 +553,7 @@ function balanceLabel(){
   }
   const hitPct = dec > 0.1 ? Math.round((hit / Math.max(dec, 0.01)) * 100) : 0
   return {
-    balance: fitW(balance, 28),
+    balance: fitW(balance, 24),
     detail:
       `cam ${padN(cam, 2)}/s · decode ${padN(dec, 2)}/s · ` +
       `hit ${padN(hit, 2)}/s (${padN(hitPct, 3)}%) · drops ${padN(pipeDropped, 3)}`
@@ -552,16 +563,18 @@ function balanceLabel(){
 function updateDecodeProgressUi(forceBar){
   const now = performance.now()
   tickPipelineWindow(now)
-  const { useful, need } = rxQrHaveNeed()
-  const needLabel = need != null ? String(need) : "?"
-  const left = need != null ? Math.max(0, need - useful) : null
+  const { useful, need, total, needPct } = rxQrHaveNeed()
   if(progressText){
     if(rxRecovered){
-      progressText.textContent = `Done · ${useful} frames`
-    }else if(left != null && left > 0){
-      progressText.textContent = `${useful} / ${needLabel} · ${left} left`
+      progressText.textContent = total != null
+        ? `Done · ${useful} / ${total}`
+        : `Done · ${useful} frames`
+    }else if(total != null && needPct != null && needPct < 100){
+      progressText.textContent = `${useful} / ${total} (only ${needPct}% needed)`
+    }else if(total != null){
+      progressText.textContent = `${useful} / ${total}`
     }else if(need != null){
-      progressText.textContent = `${useful} / ${needLabel}`
+      progressText.textContent = `${useful} / ${need}`
     }else{
       progressText.textContent = useful > 0 ? `${useful} / ?` : "Waiting for QR…"
     }
@@ -582,17 +595,15 @@ function updateDecodeProgressUi(forceBar){
   const totalW = decodeWorkers.length
   const inFlight = q + busy
   if(decodePipeFrames){
-    decodePipeFrames.textContent =
-      `Pipeline  ${padN(inFlight, 2)} in flight  (${padN(q, 2)} queued · ${padN(busy, 1)} decoding)`
-  }
-  if(decodePipeWorkers){
-    decodePipeWorkers.textContent = totalW
-      ? `Workers   ${padN(busy, 1)} busy / ${padN(totalW, 1)}`
-      : `Workers   main-thread`
-  }
-  if(decodePipeBalance){
     const b = balanceLabel()
-    decodePipeBalance.textContent = `Balance   ${b.balance}\nRates     ${b.detail}`
+    decodePipeFrames.textContent = [
+      `Pipeline  ${padN(inFlight, 2)} in flight  (${padN(q, 2)} queued · ${padN(busy, 1)} decoding)`,
+      totalW
+        ? `Workers   ${padN(busy, 1)} busy / ${padN(totalW, 1)}`
+        : `Workers   main-thread`,
+      `Balance   ${b.balance.trimEnd()}`,
+      `Rates     ${b.detail}`
+    ].join("\n")
   }
 }
 
@@ -1098,7 +1109,7 @@ function tickTx(now){
     else blitTxBitmap(frameIndex)
     if(now - txStatusAt > 200){
       txStatusAt = now
-      setStatus(`Cloud frame ${frameIndex + 1} / ${frames.length} · “${meta?.name || "file"}”`)
+      setStatus(`Particle Cloud Frame ${frameIndex + 1} / ${frames.length} · “${meta?.name || "file"}”`)
     }
   }
 }
@@ -1451,9 +1462,11 @@ function finishWithBytes(finalBytes, detail){
   downloadLink.href = url
   downloadLink.download = safeName
   downloadLink.hidden = false
-  const { useful, need } = rxQrHaveNeed()
+  const { useful, total } = rxQrHaveNeed()
   progressBar.style.width = "100%"
-  progressText.textContent = `Done · ${useful}/${need ?? useful}`
+  progressText.textContent = total != null
+    ? `Done · ${useful} / ${total}`
+    : `Done · ${useful} frames`
   setStatus(`Recovered “${safeName}” (${finalBytes.length} bytes)`)
   updateDecodeProgressUi(true)
   try{ downloadLink.click() }catch(_){}
@@ -1572,9 +1585,14 @@ async function startDecoder(){
   decodeFrameNo = 0
   progressBar.style.width = "0%"
   progressText.textContent = "0 / ?"
-  if(decodePipeFrames) decodePipeFrames.textContent = "Pipeline   — in flight  ( — queued · — decoding)"
-  if(decodePipeWorkers) decodePipeWorkers.textContent = "Workers   — busy / —"
-  if(decodePipeBalance) decodePipeBalance.textContent = "Balance   warming up                  \nRates     cam  0/s · decode  0/s · hit  0/s (  0%) · drops   0"
+  if(decodePipeFrames){
+    decodePipeFrames.textContent = [
+      "Pipeline   — in flight  ( — queued · — decoding)",
+      "Workers   — busy / —",
+      "Balance   warming up",
+      "Rates     cam  0/s · decode  0/s · hit  0/s (  0%) · drops   0"
+    ].join("\n")
+  }
   if(decodeMetersEl) decodeMetersEl.hidden = true
   if(decodeDebugEl) decodeDebugEl.hidden = true
   lastQrText = ""
