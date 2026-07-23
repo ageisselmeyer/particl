@@ -316,7 +316,7 @@ function tryJsQROnImageData(jsQR, img, w, h){
 
 // --- Decode workers + frame backlog ---
 const DECODE_QUEUE_MAX = 10
-const DECODE_WORKER_COUNT = Math.min(4, Math.max(2, (navigator.hardwareConcurrency || 4) >> 1))
+const DECODE_WORKER_COUNT = Math.min(6, Math.max(4, navigator.hardwareConcurrency || 4))
 let decodeWorkers = []
 let decodeWorkersFree = []
 let decodeJobId = 0
