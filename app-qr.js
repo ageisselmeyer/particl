@@ -315,7 +315,7 @@ function tryJsQROnImageData(jsQR, img, w, h){
 }
 
 // --- Decode workers + frame backlog ---
-const DECODE_QUEUE_MAX = 10
+const DECODE_QUEUE_MAX = 16
 const DECODE_WORKER_COUNT = Math.min(6, Math.max(4, navigator.hardwareConcurrency || 4))
 let decodeWorkers = []
 let decodeWorkersFree = []
@@ -519,12 +519,19 @@ function balanceLabel(){
 function updateDecodeProgressUi(forceBar){
   const now = performance.now()
   tickPipelineWindow(now)
-  const { have, useful, need } = rxQrHaveNeed()
+  const { useful, need } = rxQrHaveNeed()
   const needLabel = need != null ? String(need) : "?"
+  const left = need != null ? Math.max(0, need - useful) : null
   if(progressText){
-    progressText.textContent = rxRecovered
-      ? `Done · ${have} unique QR frames`
-      : `QR frames ${useful}/${needLabel} needed · ${have} unique held`
+    if(rxRecovered){
+      progressText.textContent = `Done · ${useful} frames`
+    }else if(left != null && left > 0){
+      progressText.textContent = `${useful} / ${needLabel} · ${left} left`
+    }else if(need != null){
+      progressText.textContent = `${useful} / ${needLabel}`
+    }else{
+      progressText.textContent = useful > 0 ? `${useful} / ?` : "Waiting for QR…"
+    }
   }
   if(progressBar && (forceBar || need != null)){
     if(rxRecovered){
@@ -532,8 +539,8 @@ function updateDecodeProgressUi(forceBar){
     }else if(need != null && need > 0){
       const pct = Math.min(99, Math.floor((useful / need) * 100))
       progressBar.style.width = pct + "%"
-    }else if(have > 0){
-      progressBar.style.width = Math.min(8, have) + "%"
+    }else if(useful > 0){
+      progressBar.style.width = Math.min(8, useful) + "%"
     }
   }
 
@@ -543,24 +550,17 @@ function updateDecodeProgressUi(forceBar){
   const inFlight = q + busy
   if(decodePipeFrames){
     decodePipeFrames.textContent =
-      `Pipeline: ${inFlight} frame${inFlight === 1 ? "" : "s"} in flight` +
-      ` (${q} queued · ${busy} decoding)`
+      `Pipeline: ${inFlight} in flight (${q} queued · ${busy} decoding)`
   }
   if(decodePipeWorkers){
     decodePipeWorkers.textContent = totalW
-      ? `Workers: ${busy} busy / ${totalW} total · ${decodeWorkersFree.length} free`
-      : `Workers: none · main-thread decode`
+      ? `Workers: ${busy} busy / ${totalW}`
+      : `Workers: main-thread`
   }
   if(decodePipeBalance){
     const b = balanceLabel()
     decodePipeBalance.textContent = `${b.balance} · ${b.detail}`
   }
-}
-
-function rxStatusLine(){
-  const { have, useful, need } = rxQrHaveNeed()
-  const needLabel = need != null ? String(need) : "?"
-  return `QR ${useful}/${needLabel} needed · ${have} unique · q${decodeQueue.length}`
 }
 
 function handleDecodedText(text, engineLabel){
@@ -573,7 +573,6 @@ function handleDecodedText(text, engineLabel){
     lastQrText = text
     if(ingestPayloadText(text)){
       rxPayloadOk = true
-      setStatus(rxStatusLine())
       updateDecodeProgressUi(true)
       tryFinish()
     }else{
@@ -588,25 +587,34 @@ function handleDecodedText(text, engineLabel){
   }
 }
 
-/** Grab one camera frame into the backlog (non-blocking decode). */
+/** Grab one camera frame; fan-out dilate variants so all workers stay busy. */
 function captureFrameToQueue(){
   if(!video.videoWidth) return
   const w = video.videoWidth
   const h = video.videoHeight
-  // Single lean capture size — workers try dilate variants via alternating jobs
-  const max = 720
+  // Slightly higher res when missing a lot — helps QR lock at the cost of CPU
+  const max = qrMissStreak > 10 ? 960 : 800
   const scale = Math.min(1, max / Math.max(w, h))
   const cw = Math.max(1, (w * scale) | 0)
   const ch = Math.max(1, (h * scale) | 0)
   ensureScanCanvas(cw, ch)
   scanCtx.drawImage(video, 0, 0, w, h, 0, 0, cw, ch)
   const img = scanCtx.getImageData(0, 0, cw, ch)
-  const variant = decodeFrameNo % 3
-  const dilate = variant === 0 ? 1 : (variant === 1 ? 2 : 0)
-  const tryHarder = qrMissStreak > 8 || variant === 1
   pipeCaptureCount++
   pipeWinCapture++
-  enqueueDecodeJob(img, dilate, tryHarder)
+
+  // Parallel variants: one camera frame → several decode jobs (uses idle workers, raises hit rate)
+  const variants = [
+    { dilate: 1, tryHarder: false },
+    { dilate: 0, tryHarder: false },
+    { dilate: 2, tryHarder: true }
+  ]
+  const room = Math.max(0, DECODE_QUEUE_MAX - decodeQueue.length)
+  const want = qrMissStreak > 6 ? 3 : 2
+  const n = Math.max(1, Math.min(want, variants.length, Math.max(1, room)))
+  for(let i = 0; i < n; i++){
+    enqueueDecodeJob(img, variants[i].dilate, variants[i].tryHarder)
+  }
 }
 
 async function scanNativeDetector(){
@@ -970,13 +978,24 @@ function appendMdsBurst(out, fileId, fileMeta, chunkIdx, chunkCount, chunkBytes)
 function buildFrames(fileBytes, fileMeta){
   const fileId = (crypto.getRandomValues(new Uint32Array(1))[0] >>> 0).toString(36)
   const chunkCount = Math.max(1, Math.ceil(fileBytes.length / CHUNK_PAYLOAD))
-  const out = []
+  const bursts = []
   let need = 0
   for(let c = 0; c < chunkCount; c++){
     const start = c * CHUNK_PAYLOAD
     const slice = fileBytes.subarray(start, Math.min(start + CHUNK_PAYLOAD, fileBytes.length))
-    const burst = appendMdsBurst(out, fileId, fileMeta, c, chunkCount, slice)
-    need += burst.k
+    const burst = []
+    const stats = appendMdsBurst(burst, fileId, fileMeta, c, chunkCount, slice)
+    need += stats.k
+    bursts.push(burst)
+  }
+  // Round-robin across chunks so one pass advances every chunk (faster finish / less coupon-collector stall)
+  const out = []
+  let maxLen = 0
+  for(const b of bursts) if(b.length > maxLen) maxLen = b.length
+  for(let i = 0; i < maxLen; i++){
+    for(let c = 0; c < bursts.length; c++){
+      if(i < bursts[c].length) out.push(bursts[c][i])
+    }
   }
   out._fountain = {
     k: TARGET_K,
@@ -1180,11 +1199,11 @@ function updateDecodeMeters(){
 
 function updateDecodeDebug(){
   if(!decodeDebugEl) return
-  const { have, useful, need } = rxQrHaveNeed()
+  const { useful, need } = rxQrHaveNeed()
   decodeDebugEl.textContent = [
     `frame ${decodeFrameNo} · ${decodeDbg.video} · ~${decodeDbg.fps} fps`,
     `engine ${decodeDbg.engine} · hits ${decodeDbg.hits} · streak ${qrHitStreak}`,
-    `QR ${useful}/${need ?? "?"} needed · ${have} unique · scans=${rxDecodeCount}`,
+    `progress ${useful}/${need ?? "?"} · scans=${rxDecodeCount}`,
     `pipe q=${decodeQueue.length} busy=${workersBusy()}/${decodeWorkers.length}`,
     `last: ${decodeDbg.last}`
   ].join("\n")
@@ -1344,10 +1363,10 @@ function finishWithBytes(finalBytes, detail){
   downloadLink.href = url
   downloadLink.download = safeName
   downloadLink.hidden = false
-  const { have, useful, need } = rxQrHaveNeed()
+  const { useful, need } = rxQrHaveNeed()
   progressBar.style.width = "100%"
-  progressText.textContent = `Done · ${useful}/${need ?? useful} QR frames`
-  setStatus(`Recovered “${safeName}” (${finalBytes.length} bytes) · ${have} unique · ${detail}`)
+  progressText.textContent = `Done · ${useful}/${need ?? useful}`
+  setStatus(`Recovered “${safeName}” (${finalBytes.length} bytes)`)
   updateDecodeProgressUi(true)
   try{ downloadLink.click() }catch(_){}
   rxRecovered = true
@@ -1455,7 +1474,7 @@ async function startDecoder(){
   resetPipelineStats()
   decodeFrameNo = 0
   progressBar.style.width = "0%"
-  progressText.textContent = "QR frames 0/? needed"
+  progressText.textContent = "0 / ?"
   if(decodePipeFrames) decodePipeFrames.textContent = "Pipeline: —"
   if(decodePipeWorkers) decodePipeWorkers.textContent = "Workers: —"
   if(decodePipeBalance) decodePipeBalance.textContent = "Balance: —"
@@ -1534,8 +1553,8 @@ async function decodeLoop(){
   decodeUiTick++
   updateDecodeProgressUi((decodeUiTick & 3) === 0)
 
-  // Native detector occasionally (cheap on Safari) — don't block capture
-  if(detector && (decodeFrameNo % 4) === 0){
+  // Native detector often — Safari is good at this and it raises hit rate
+  if(detector && (decodeFrameNo % 2) === 0){
     const nativeText = await scanNativeDetector()
     if(nativeText) handleDecodedText(nativeText, "BarcodeDetector")
     if(rxRecovered) return
