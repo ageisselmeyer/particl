@@ -46,7 +46,7 @@ const meterCrcPeak = document.getElementById("meterCrcPeak")
 
 document.getElementById("btnEncode").addEventListener("click", () => {
   fileInput.value = ""
-  setStatus("Choose a file to encode as QR frames.")
+  setStatus("")
   fileInput.click()
 })
 document.getElementById("btnDecode").addEventListener("click", () => startDecoder())
@@ -510,31 +510,42 @@ function rxQrHaveNeed(){
   return { have: 0, useful: 0, need: null, totalTx: null }
 }
 
+function padN(n, w){
+  return String(Math.round(Number(n) || 0)).padStart(w, " ")
+}
+
+function fitW(s, w){
+  const t = String(s)
+  return t.length > w ? t.slice(0, w) : t.padEnd(w, " ")
+}
+
 function balanceLabel(){
   const q = decodeQueue.length
   const busy = workersBusy()
-  const total = decodeWorkers.length
   const cam = pipeCamFps
   const dec = pipeDecodeFps
   const hit = pipeHitFps
+  // Fixed-width phrases so the debug box does not reflow / jump.
   let balance = "warming up"
   if(cam > 0.5 || dec > 0.5){
     if(pipeWinDrop > 0 || q >= DECODE_QUEUE_MAX - 1){
-      balance = "camera ahead · workers saturated (dropping frames)"
+      balance = "dropping · workers full"
     }else if(q === 0 && busy === 0 && cam > dec * 1.2){
-      balance = "workers idle · waiting on QR lock"
+      balance = "idle · waiting QR lock"
     }else if(dec > 0 && cam > 0 && cam > dec * 1.25){
-      balance = "camera faster than decode"
+      balance = "camera ahead of decode"
     }else if(dec > 0 && cam > 0 && dec > cam * 1.25){
-      balance = "decode keeping up / ahead of camera"
+      balance = "decode keeping up"
     }else{
-      balance = "camera ↔ decode matched"
+      balance = "cam ↔ decode matched"
     }
   }
   const hitPct = dec > 0.1 ? Math.round((hit / Math.max(dec, 0.01)) * 100) : 0
   return {
-    balance,
-    detail: `cam ${cam.toFixed(0)}/s · decode ${dec.toFixed(0)}/s · QR-hit ${hit.toFixed(0)}/s (${hitPct}%) · drops ${pipeDropped}`
+    balance: fitW(balance, 28),
+    detail:
+      `cam ${padN(cam, 2)}/s · decode ${padN(dec, 2)}/s · ` +
+      `hit ${padN(hit, 2)}/s (${padN(hitPct, 3)}%) · drops ${padN(pipeDropped, 3)}`
   }
 }
 
@@ -572,16 +583,16 @@ function updateDecodeProgressUi(forceBar){
   const inFlight = q + busy
   if(decodePipeFrames){
     decodePipeFrames.textContent =
-      `Pipeline: ${inFlight} in flight (${q} queued · ${busy} decoding)`
+      `Pipeline  ${padN(inFlight, 2)} in flight  (${padN(q, 2)} queued · ${padN(busy, 1)} decoding)`
   }
   if(decodePipeWorkers){
     decodePipeWorkers.textContent = totalW
-      ? `Workers: ${busy} busy / ${totalW}`
-      : `Workers: main-thread`
+      ? `Workers   ${padN(busy, 1)} busy / ${padN(totalW, 1)}`
+      : `Workers   main-thread`
   }
   if(decodePipeBalance){
     const b = balanceLabel()
-    decodePipeBalance.textContent = `${b.balance} · ${b.detail}`
+    decodePipeBalance.textContent = `Balance   ${b.balance}\nRates     ${b.detail}`
   }
 }
 
@@ -1203,12 +1214,13 @@ function updateDecodeMeters(){
 function updateDecodeDebug(){
   if(!decodeDebugEl) return
   const { useful, need } = rxQrHaveNeed()
+  const needS = need != null ? padN(need, 4) : "   ?"
   decodeDebugEl.textContent = [
-    `frame ${decodeFrameNo} · ${decodeDbg.video} · ~${decodeDbg.fps} fps`,
-    `engine ${decodeDbg.engine} · hits ${decodeDbg.hits} · streak ${qrHitStreak}`,
-    `progress ${useful}/${need ?? "?"} · scans=${rxDecodeCount}`,
-    `pipe q=${decodeQueue.length} busy=${workersBusy()}/${decodeWorkers.length}`,
-    `last: ${decodeDbg.last}`
+    `frame ${padN(decodeFrameNo, 6)} · ${fitW(decodeDbg.video || "—", 11)} · ~${fitW(decodeDbg.fps || "0.0", 4)} fps`,
+    `engine ${fitW(decodeDbg.engine || "—", 16)} · hits ${padN(decodeDbg.hits, 5)} · streak ${padN(qrHitStreak, 3)}`,
+    `progress ${padN(useful, 4)}/${needS} · scans ${padN(rxDecodeCount, 5)}`,
+    `pipe q=${padN(decodeQueue.length, 2)} busy=${padN(workersBusy(), 1)}/${padN(decodeWorkers.length, 1)}`,
+    `last: ${fitW(decodeDbg.last || "—", 52)}`
   ].join("\n")
 }
 
@@ -1528,13 +1540,6 @@ async function tuneDecoderCamera(stream){
   return typeof track.getSettings === "function" ? track.getSettings() : {}
 }
 
-function formatCaptureLabel(settings, vw, vh){
-  const w = settings.width || vw || 0
-  const h = settings.height || vh || 0
-  const fps = settings.frameRate != null ? settings.frameRate.toFixed(0) : "?"
-  return `${w}×${h} @ ~${fps} fps`
-}
-
 function ensureScanCanvas(w, h){
   if(!scanCanvas){
     scanCanvas = document.createElement("canvas")
@@ -1567,9 +1572,9 @@ async function startDecoder(){
   decodeFrameNo = 0
   progressBar.style.width = "0%"
   progressText.textContent = "0 / ?"
-  if(decodePipeFrames) decodePipeFrames.textContent = "Pipeline: —"
-  if(decodePipeWorkers) decodePipeWorkers.textContent = "Workers: —"
-  if(decodePipeBalance) decodePipeBalance.textContent = "Balance: —"
+  if(decodePipeFrames) decodePipeFrames.textContent = "Pipeline   — in flight  ( — queued · — decoding)"
+  if(decodePipeWorkers) decodePipeWorkers.textContent = "Workers   — busy / —"
+  if(decodePipeBalance) decodePipeBalance.textContent = "Balance   warming up                  \nRates     cam  0/s · decode  0/s · hit  0/s (  0%) · drops   0"
   if(decodeMetersEl) decodeMetersEl.hidden = true
   if(decodeDebugEl) decodeDebugEl.hidden = true
   lastQrText = ""
@@ -1616,16 +1621,10 @@ async function startDecoder(){
   }
 
   decodeRunning = true
-  const showCaptureStatus = () => {
-    const capLabel = formatCaptureLabel(captureSettings, video.videoWidth, video.videoHeight)
-    const wlab = decodeWorkers.length ? `${decodeWorkers.length} workers` : "main-thread"
-    setStatus(`Decode · ${wlab} · ${capLabel}`)
-  }
-  showCaptureStatus()
+  setStatus("")
   video.addEventListener("loadedmetadata", () => {
     captureSettings = { ...captureSettings, width: video.videoWidth, height: video.videoHeight }
     decodeDbg.video = `${video.videoWidth}x${video.videoHeight}`
-    showCaptureStatus()
   }, { once: true })
   decodeLoop()
 }
@@ -1687,7 +1686,7 @@ function bootQr(){
     window.__particlQrType = 0
     drawQrToCanvas(window.__particlIdlePayload || "PartiCl QR ready - Encode a file")
     ensureRs().catch((e) => console.warn("RS preload failed", e))
-    setStatus("QR · Encode a file — or Decode with the camera.")
+    setStatus("")
   }catch(err){
     console.error(err)
     setStatus(`Cloud failed: ${err.message || err}`)
