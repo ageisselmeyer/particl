@@ -1,8 +1,17 @@
 /**
- * PartiCl QR transfer mode — MDS fountain (any k of n QRs recover).
+ * PartiCl QR transfer mode — LT/Raptor-style fountain (global, rateless-ish).
  * Particle codec lives in app.js for later.
  * RS is loaded dynamically so a failed import cannot blank the boot cloud.
  */
+import {
+  LT_BLOCK,
+  buildFountainPayloads,
+  tryFountainRecover,
+  ltNeighbors,
+  ltPeelPartial,
+  countKnown
+} from "./fountain.js"
+
 let rsEncode = null
 let rsDecodeErasures = null
 
@@ -463,6 +472,14 @@ function enqueueDecodeJob(imgData, dilate, tryHarder){
 
 /** Unique QR symbols held + how many are still needed to finish. */
 function rxQrHaveNeed(){
+  if(rxMode === "lt"){
+    return {
+      have: rxLtMap.size,
+      useful: rxLtKnownCount,
+      need: rxLtK,
+      totalTx: null
+    }
+  }
   if(rxMode === "chunked"){
     let have = 0
     let useful = 0
@@ -977,36 +994,13 @@ function appendMdsBurst(out, fileId, fileMeta, chunkIdx, chunkCount, chunkBytes)
 }
 
 function buildFrames(fileBytes, fileMeta){
-  const fileId = (crypto.getRandomValues(new Uint32Array(1))[0] >>> 0).toString(36)
-  const chunkCount = Math.max(1, Math.ceil(fileBytes.length / CHUNK_PAYLOAD))
-  const bursts = []
-  let need = 0
-  for(let c = 0; c < chunkCount; c++){
-    const start = c * CHUNK_PAYLOAD
-    const slice = fileBytes.subarray(start, Math.min(start + CHUNK_PAYLOAD, fileBytes.length))
-    const burst = []
-    const stats = appendMdsBurst(burst, fileId, fileMeta, c, chunkCount, slice)
-    need += stats.k
-    bursts.push(burst)
-  }
-  // Round-robin across chunks so one pass advances every chunk (faster finish / less coupon-collector stall)
-  const out = []
-  let maxLen = 0
-  for(const b of bursts) if(b.length > maxLen) maxLen = b.length
-  for(let i = 0; i < maxLen; i++){
-    for(let c = 0; c < bursts.length; c++){
-      if(i < bursts[c].length) out.push(bursts[c][i])
-    }
-  }
-  out._fountain = {
-    k: GEN_K,
-    n: GEN_N,
-    rate: RS_RATE,
-    chunks: chunkCount,
-    total: out.length,
-    need,
-    chunkPayload: CHUNK_PAYLOAD
-  }
+  const { frames: out, meta: ft } = buildFountainPayloads(
+    fileBytes,
+    fileMeta,
+    utf8ToB64,
+    bytesToB64
+  )
+  out._fountain = ft
   return out
 }
 
@@ -1068,9 +1062,8 @@ function encodeFile(file){
       txRaf = requestAnimationFrame(loop)
       const ft = frames._fountain || {}
       const mins = ((frames.length * FRAME_HOLD_MS) / 60000).toFixed(1)
-      const pct = Math.round((ft.rate || RS_RATE) * 100)
       setStatus(
-        `MDS · “${meta.name}” · ${ft.chunks || 1} gens · any ${pct}% · ` +
+        `LT fountain · “${meta.name}” · ${ft.K || "?"} blocks · ` +
         `${frames.length} frames (~${mins}m/loop) · need ~${ft.need} · point camera here`
       )
     }catch(err){
@@ -1106,7 +1099,7 @@ let rxTotal = null
 let rxFileId = null
 let rxMeta = null
 let rxFountain = false
-let rxMode = null // "legacy" | "chunked"
+let rxMode = null // "legacy" | "chunked" | "lt"
 let rxK = null
 let rxN = null
 let rxR = null
@@ -1116,6 +1109,13 @@ let rxChunkCount = null
 let rxChunkSymbols = new Map() // chunkIdx -> Map(seq -> bytes)
 let rxChunkInfo = new Map() // chunkIdx -> {k,n,symLen,chunkLen}
 let rxChunkData = new Map() // chunkIdx -> recovered bytes
+let rxLtMap = new Map() // key -> {indices, data}
+let rxLtK = null
+let rxLtS = null
+let rxLtL = null
+let rxLtKnownCount = 0
+let rxLtSources = null
+let rxLtBlockLen = LT_BLOCK
 let rxDecodeCount = 0
 let rxPayloadOk = false
 let rxRecovered = false
@@ -1229,6 +1229,13 @@ function resetRxState(){
   rxChunkSymbols = new Map()
   rxChunkInfo = new Map()
   rxChunkData = new Map()
+  rxLtMap = new Map()
+  rxLtK = null
+  rxLtS = null
+  rxLtL = null
+  rxLtKnownCount = 0
+  rxLtSources = null
+  rxLtBlockLen = LT_BLOCK
   rxDecodeCount = 0
   rxPayloadOk = false
   rxRecovered = false
@@ -1243,7 +1250,7 @@ function ingestMdsSymbol(fileId, k, n, seq, data){
   if(!data || !data.length) return false
   if(rxFileId == null) rxFileId = fileId
   if(fileId !== rxFileId) return false
-  if(rxMode === "chunked") return false
+  if(rxMode === "chunked" || rxMode === "lt") return false
   if(rxSymLen != null && data.length !== rxSymLen) return false
   rxFountain = true
   rxMode = "legacy"
@@ -1268,7 +1275,7 @@ function ingestChunkSymbol(fileId, chunkIdx, chunkCount, k, n, chunkLen, seq, da
   if(!data || !data.length) return false
   if(rxFileId == null) rxFileId = fileId
   if(fileId !== rxFileId) return false
-  if(rxMode === "legacy") return false
+  if(rxMode === "legacy" || rxMode === "lt") return false
   rxFountain = true
   rxMode = "chunked"
   rxChunkCount = chunkCount
@@ -1282,8 +1289,74 @@ function ingestChunkSymbol(fileId, chunkIdx, chunkCount, k, n, chunkLen, seq, da
   return true
 }
 
+function ingestLtSymbol(fileId, K, S, kind, seed, data){
+  if(!Number.isFinite(K) || K < 1) return false
+  if(!Number.isFinite(S) || S < 0) return false
+  if(!data || !data.length) return false
+  if(rxFileId == null) rxFileId = fileId
+  if(fileId !== rxFileId) return false
+  if(rxMode === "legacy" || rxMode === "chunked") return false
+  const L = K + S
+  rxFountain = true
+  rxMode = "lt"
+  rxLtK = K
+  rxLtS = S
+  rxLtL = L
+  rxLtBlockLen = data.length
+  rxDecodeCount++
+
+  let indices
+  if(kind === "I" || kind === "S"){
+    if(!Number.isFinite(seed) || seed < 0 || seed >= L) return false
+    indices = [seed]
+  }else if(kind === "L"){
+    if(!Number.isFinite(seed)) return false
+    indices = ltNeighbors(L, seed >>> 0)
+  }else{
+    return false
+  }
+
+  const key = `${kind}:${seed >>> 0}`
+  if(rxLtMap.has(key)) return true
+  rxLtMap.set(key, { indices, data: Uint8Array.from(data) })
+
+  // Progress peel frequently; full recover when we might be done
+  const due = (rxLtMap.size % 4) === 0 || rxLtMap.size >= K
+  if(due){
+    if(rxLtMap.size >= K){
+      const r = tryFountainRecover(K, S, fileId, rxLtMap)
+      rxLtKnownCount = r.knownCount
+      if(r.ok) rxLtSources = r.sources
+    }else{
+      const known = ltPeelPartial(L, rxLtMap)
+      rxLtKnownCount = countKnown(known, K)
+    }
+  }
+  return true
+}
+
 function ingestPayloadText(text){
   if(!text || typeof text !== "string") return false
+  if(text.startsWith("PC9F|")){
+    const parts = text.split("|")
+    if(parts.length < 10) return false
+    const fileId = parts[1]
+    const K = parseInt(parts[2], 10)
+    const S = parseInt(parts[3], 10)
+    const size = parseInt(parts[4], 10)
+    const name = b64ToUtf8(parts[5])
+    const type = b64ToUtf8(parts[6])
+    const kind = parts[7]
+    const seed = parseInt(parts[8], 10)
+    const data = b64ToBytes(parts.slice(9).join("|"))
+    if(!ingestLtSymbol(fileId, K, S, kind, seed, data)) return false
+    rxMeta = {
+      name: (name && name.trim()) ? name.trim() : (rxMeta?.name || "recovered_file"),
+      type: (type && type.trim()) ? type.trim() : (rxMeta?.type || "application/octet-stream"),
+      size: Number.isFinite(size) ? size : (rxMeta?.size ?? null)
+    }
+    return true
+  }
   if(text.startsWith("PC8M|")){
     const parts = text.split("|")
     if(parts.length < 12) return false
@@ -1403,7 +1476,23 @@ function tryFinishChunked(){
   return finishWithBytes(finalBytes, `${rxChunkCount} chunks · ${uniq} QRs`)
 }
 
+function tryFinishLt(){
+  if(rxLtK == null || rxLtS == null) return false
+  if(!rxLtSources){
+    const r = tryFountainRecover(rxLtK, rxLtS, rxFileId, rxLtMap)
+    rxLtKnownCount = r.knownCount
+    if(!r.ok) return false
+    rxLtSources = r.sources
+  }
+  const blockLen = rxLtBlockLen || LT_BLOCK
+  const merged = new Uint8Array(rxLtK * blockLen)
+  for(let i = 0; i < rxLtK; i++) merged.set(rxLtSources[i], i * blockLen)
+  const finalBytes = rxMeta?.size != null ? merged.slice(0, rxMeta.size) : merged
+  return finishWithBytes(finalBytes, `LT · ${rxLtMap.size} symbols`)
+}
+
 function tryFinishFountain(){
+  if(rxMode === "lt") return tryFinishLt()
   if(rxMode === "chunked") return tryFinishChunked()
   const sources = tryRecoverSources()
   if(!sources) return false
