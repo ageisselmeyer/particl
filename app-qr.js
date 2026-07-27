@@ -615,6 +615,7 @@ let pipeHitFps = 0
 /** Average useful-frame rate from first successful decode onward. */
 let usefulFrameFps = 0
 let usefulFrameLast = 0
+let usefulFramePeak = 0
 let usefulFrameT0 = 0
 
 function resetPipelineStats(){
@@ -632,24 +633,27 @@ function resetPipelineStats(){
   pipeHitFps = 0
   usefulFrameFps = 0
   usefulFrameLast = 0
+  usefulFramePeak = 0
   usefulFrameT0 = 0
 }
 
 function tickUsefulFrameRate(useful, now){
   const u = Math.max(0, useful | 0)
-  if(u < usefulFrameLast || (u === 0 && usefulFrameT0)){
-    usefulFrameLast = u
+  // Only reset on a new transfer (counter back to 0). Mid-stream dips
+  // (chunk maps clearing, mode flips) used to restart t0 → fps blow-ups.
+  if(u === 0){
+    usefulFrameLast = 0
+    usefulFramePeak = 0
     usefulFrameT0 = 0
-    usefulFrameFps = 0
-  }
-  usefulFrameLast = u
-  if(u <= 0){
     usefulFrameFps = 0
     return
   }
   if(!usefulFrameT0) usefulFrameT0 = now
-  const elapsedSec = (now - usefulFrameT0) / 1000
-  usefulFrameFps = elapsedSec > 0.05 ? u / elapsedSec : 0
+  if(u > usefulFramePeak) usefulFramePeak = u
+  usefulFrameLast = u
+  // Never divide by <1s — early samples otherwise spike to tens of fps.
+  const elapsedSec = Math.max(1, (now - usefulFrameT0) / 1000)
+  usefulFrameFps = usefulFramePeak / elapsedSec
 }
 
 function tickPipelineWindow(now){
@@ -673,7 +677,7 @@ function workersBusy(){
 function ensureDecodeWorkers(){
   if(decodeWorkers.length) return
   const url = new URL("decode-worker.js", import.meta.url)
-  url.searchParams.set("v", "noise34")
+  url.searchParams.set("v", "700750")
   for(let i = 0; i < DECODE_WORKER_COUNT; i++){
     try{
       const w = new Worker(url)
@@ -2095,11 +2099,7 @@ function bootQr(){
     window.__particlMarginFrac = cloudMarginFrac()
     drawQrToCanvas(window.__particlIdlePayload || "PartiCl QR ready - Encode a file")
     ensureRs().catch((e) => console.warn("RS preload failed", e))
-    setStatus(PLAIN_QR
-      ? "Plain QR (no noise) · Encode a file"
-      : STIPPLE_QR
-        ? "Stipple QR · solid finders · Encode a file"
-        : noiseMode === "off" ? "Noise filter failed to load" : `Noise (${noiseMode}) · Encode a file`)
+    setStatus("")
   }catch(err){
     console.error(err)
     setStatus(`Cloud failed: ${err.message || err}`)
