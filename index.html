@@ -8,12 +8,12 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>PartiCl</title>
-<link rel="stylesheet" href="styles.css?v=154903">
+<link rel="stylesheet" href="styles.css?v=noise34">
 </head>
 <body>
   <header>
     <h1>PartiCl</h1>
-    <p class="tagline">Particle Cloud Transfer · <span id="buildId">154903</span></p>
+    <p class="tagline">Particle Cloud Transfer · <span id="buildId">noise34</span></p>
   </header>
 
   <input type="file" id="fileInput" hidden>
@@ -27,7 +27,7 @@
     <canvas id="cloud" aria-label="QR modules"></canvas>
     <img id="qrImg" hidden alt="" width="1024" height="1024">
     <canvas id="qrCanvas" hidden aria-hidden="true"></canvas>
-    <div id="alignFrame" hidden aria-hidden="true">
+    <div id="alignFrame" aria-hidden="true">
       <span class="align-mark align-tl"></span>
       <span class="align-mark align-tr"></span>
       <span class="align-mark align-br"></span>
@@ -86,8 +86,8 @@
     </div>
     <div class="meterRow">
       <div class="meterHead">
-        <span class="meterLabel">Payload</span>
-        <span class="meterValue" id="meterCrcVal">searching</span>
+        <span class="meterLabel">Transfer</span>
+        <span class="meterValue" id="meterCrcVal">waiting</span>
       </div>
       <div class="meterTrack">
         <div class="meterFill meterFillCrc" id="meterCrcFill"></div>
@@ -100,7 +100,7 @@
   <script src="vendor/jsqr/jsQR.js"></script>
   <script src="vendor/zxing/zxing.min.js"></script>
   <script>
-    // White square · all modules as black dots. Path2D batch fill for faster TX prerender.
+    // White paper · decode-safe stipple (polarity preserved — no XOR / no cyan).
     window.__particlIdlePayload =
       "PartiCl QR ready - Encode a file | pad:" + Array(181).join("x");
     window.__particlPaintCloud = function(text){
@@ -112,7 +112,7 @@
         wrap.classList.remove("tx-cloud");
         wrap.classList.add("tx-paper");
         wrap.style.background = "#fff";
-        wrap.style.borderRadius = "28px";
+        wrap.style.borderRadius = "12px";
       }
       if(!c || typeof qrcode !== "function") return false;
       var type = (window.__particlQrType | 0);
@@ -123,8 +123,15 @@
       var n = qr.getModuleCount();
       var quiet = 4;
       var W = 1024;
+      var marginFrac = Number(window.__particlMarginFrac) || 0;
+      if(marginFrac > 0.2) marginFrac = 0.07;
+      var solid = !!window.__particlSolidModules;
+      var stipple = !!window.__particlStipple && !solid;
+      var omitFinders = !!window.__particlOmitFinders;
       var cell = Math.max(8, Math.floor(W / (n + quiet * 2)));
-      var size = cell * (n + quiet * 2);
+      var qrSide = cell * (n + quiet * 2);
+      var margin = Math.round(qrSide * marginFrac);
+      var size = qrSide + margin * 2;
       c.hidden = false;
       c.style.display = "block";
       c.style.opacity = "1";
@@ -140,32 +147,85 @@
       ctx.fillStyle = "#ffffff";
       ctx.fillRect(0, 0, size, size);
 
-      var origin = quiet * cell;
-      var dotRad = cell * 0.48;
-      var path = typeof Path2D !== "undefined" ? new Path2D() : null;
+      function isFinder(r, col){
+        if(r < 7 && col < 7) return true;
+        if(r < 7 && col >= n - 7) return true;
+        if(r >= n - 7 && col < 7) return true;
+        return false;
+      }
+
+      var origin = quiet * cell + margin;
+      var pathSolid = typeof Path2D !== "undefined" ? new Path2D() : null;
+      var pathDots = typeof Path2D !== "undefined" ? new Path2D() : null;
       ctx.fillStyle = "#000000";
       for(var r = 0; r < n; r++){
         for(var col = 0; col < n; col++){
+          if(omitFinders && isFinder(r, col)) continue;
           if(!qr.isDark(r, col)) continue;
           var x = origin + (col + 0.5) * cell;
           var y = origin + (r + 0.5) * cell;
-          if(path){
-            path.moveTo(x + dotRad, y);
-            path.arc(x, y, dotRad, 0, Math.PI * 2);
+          // Finders solid for lock; timing + data are stipple (no white timing gutters).
+          var keepSolid = solid || !stipple || isFinder(r, col);
+          if(keepSolid){
+            if(pathSolid){
+              pathSolid.rect(x - cell * 0.5, y - cell * 0.5, cell, cell);
+            }else{
+              ctx.fillRect(x - cell * 0.5, y - cell * 0.5, cell, cell);
+            }
           }else{
-            ctx.beginPath();
-            ctx.arc(x, y, dotRad, 0, Math.PI * 2);
-            ctx.fill();
+            var seed = (r * 73856093) ^ (col * 19349663) ^ 0x50415254;
+            var dots = 3 + (seed >>> 0) % 3;
+            for(var d = 0; d < dots; d++){
+              seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+              var jx = ((seed % 1000) / 1000 - 0.5) * cell * 0.55;
+              seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+              var jy = ((seed % 1000) / 1000 - 0.5) * cell * 0.55;
+              seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+              var rad = cell * (0.16 + (seed % 1000) / 1000 * 0.12);
+              var dx = x + jx, dy = y + jy;
+              if(pathDots){
+                pathDots.moveTo(dx + rad, dy);
+                pathDots.arc(dx, dy, rad, 0, Math.PI * 2);
+              }else{
+                ctx.beginPath();
+                ctx.arc(dx, dy, rad, 0, Math.PI * 2);
+                ctx.fill();
+              }
+            }
           }
         }
       }
-      if(path) ctx.fill(path);
+      if(pathSolid) ctx.fill(pathSolid);
+      if(pathDots) ctx.fill(pathDots);
+
+      if(stipple){
+        ctx.globalAlpha = 0.35;
+        for(var r2 = 0; r2 < n; r2++){
+          for(var c2 = 0; c2 < n; c2++){
+            if(omitFinders && isFinder(r2, c2)) continue;
+            if(qr.isDark(r2, c2) || isFinder(r2, c2)) continue;
+            var s2 = (r2 * 83492791) ^ (c2 * 39916801);
+            if(((s2 >>> 0) % 100) > 8) continue;
+            var x2 = origin + (c2 + 0.5) * cell;
+            var y2 = origin + (r2 + 0.5) * cell;
+            s2 = (Math.imul(s2, 1664525) + 1013904223) >>> 0;
+            ctx.beginPath();
+            ctx.arc(
+              x2 + ((s2 % 100) / 100 - 0.5) * cell * 0.4,
+              y2 + (((s2 >>> 8) % 100) / 100 - 0.5) * cell * 0.4,
+              cell * 0.08, 0, Math.PI * 2
+            );
+            ctx.fill();
+          }
+        }
+        ctx.globalAlpha = 1;
+      }
       return true;
     };
     window.__particlPaintCloud(window.__particlIdlePayload);
     var st = document.getElementById("status");
     if(st) st.textContent = "";
   </script>
-  <script type="module" src="app-qr.js?v=154903"></script>
+  <script type="module" src="app-qr.js?v=noise34"></script>
 </body>
 </html>

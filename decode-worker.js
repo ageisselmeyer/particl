@@ -55,8 +55,9 @@ function tryZXing(data, w, h, hard){
 
 function tryJsQR(data, w, h){
   if(typeof jsQR !== "function") return null
-  const code = jsQR(data, w, h, { inversionAttempts: "dontInvert" })
-  return code && code.data ? code.data : null
+  const code = jsQR(data, w, h, { inversionAttempts: "attemptBoth" })
+  if(!(code && code.data)) return null
+  return { text: code.data, version: code.version || 0 }
 }
 
 self.onmessage = (ev) => {
@@ -67,9 +68,14 @@ self.onmessage = (ev) => {
   if(dilate > 0) dilateRgba(data, w, h, dilate)
   let text = tryZXing(data, w, h, !!tryHarder)
   let engine = text ? "ZXing" : null
+  let version = 0
   if(!text){
-    text = tryJsQR(data, w, h)
-    if(text) engine = "jsQR"
+    const r = tryJsQR(data, w, h)
+    if(r){
+      text = r.text
+      version = r.version | 0
+      engine = "jsQR"
+    }
   }
-  self.postMessage({ type: "result", id, text: text || null, engine, w, dilate })
+  self.postMessage({ type: "result", id, text: text || null, engine, version, w, dilate })
 }
