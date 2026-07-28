@@ -1409,7 +1409,7 @@ function updateDecodeMeters(){
     // High SYNC alone is not CRC progress — the old "40%" meter was misleading.
     crcScore = 8
     crcLabel = `SYNC ${syncNow}/32 · need CRC`
-  }else{
+    }else{
     crcScore = 0
     crcLabel = "no lock"
   }
@@ -1584,7 +1584,7 @@ function tryFinish(){
   for(const p of parts){ merged.set(p, off); off += p.length }
   const finalBytes = rxMeta.size != null ? merged.slice(0, rxMeta.size) : merged
   const blob = new Blob([finalBytes], { type: rxMeta.type || "application/octet-stream" })
-  const url = URL.createObjectURL(blob)
+      const url = URL.createObjectURL(blob)
   downloadLink.href = url
   downloadLink.download = rxMeta.name || "recovered_file"
   downloadLink.hidden = false

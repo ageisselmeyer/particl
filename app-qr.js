@@ -40,6 +40,9 @@ let rsDecodeErasures = null
 
 const canvasWrap = document.getElementById("canvasWrap")
 const cloudCanvas = document.getElementById("cloud")
+// Cyan align brackets are XOR-only — never show on default boot (avoids startup flash).
+const alignFrameEl = document.getElementById("alignFrame")
+if(alignFrameEl) alignFrameEl.hidden = true
 const qrImg = document.getElementById("qrImg")
 const qrCanvas = document.getElementById("qrCanvas")
 const fileInput = document.getElementById("fileInput")
@@ -677,7 +680,7 @@ function workersBusy(){
 function ensureDecodeWorkers(){
   if(decodeWorkers.length) return
   const url = new URL("decode-worker.js", import.meta.url)
-  url.searchParams.set("v", "482916")
+  url.searchParams.set("v", "630712")
   for(let i = 0; i < DECODE_WORKER_COUNT; i++){
     try{
       const w = new Worker(url)
@@ -1234,15 +1237,17 @@ function drawQrToCanvas(text){
   window.__particlStipple = STIPPLE_QR
   window.__particlOmitFinders = OMIT_FINDERS
   window.__particlMarginFrac = cloudMarginFrac()
+  let painted = false
   if(typeof window.__particlPaintCloud === "function"){
-    if(window.__particlPaintCloud(text)){
-      applyTxNoiseFilter()
-      return
-    }
+    painted = !!window.__particlPaintCloud(text)
   }
-  spawnCloudFromText(text)
-  paintParticleCloud(performance.now())
+  if(!painted){
+    spawnCloudFromText(text)
+    paintParticleCloud(performance.now())
+  }
   applyTxNoiseFilter()
+  if(canvasWrap) canvasWrap.classList.remove("is-booting")
+  window.__particlBootPainted = true
 }
 
 function blitTxBitmap(index){
@@ -1294,8 +1299,7 @@ function showQrUi(){
     cloudCanvas.style.display = "block"
     cloudCanvas.style.background = "#fff"
   }
-  const align = document.getElementById("alignFrame")
-  if(align) align.hidden = true
+  if(alignFrameEl) alignFrameEl.hidden = true
   setPlainPaperStyle()
   canvasWrap.style.display = ""
   videoWrap.hidden = true
@@ -2088,16 +2092,12 @@ async function decodeLoop(){
 // Boot — keep the classic blue-on-black cloud (do not overwrite with washed particle RAF)
 function bootQr(){
   try{
-    showQrUi()
     if(typeof (globalThis.qrcode || window.qrcode) !== "function"){
       throw new Error("vendor/qrcode/qrcode.js did not expose window.qrcode")
     }
     window.__particlQrType = 0
-    window.__particlSolidModules = PLAIN_QR
-    window.__particlStipple = STIPPLE_QR
-    window.__particlOmitFinders = OMIT_FINDERS
-    window.__particlMarginFrac = cloudMarginFrac()
     drawQrToCanvas(window.__particlIdlePayload || "PartiCl QR ready - Encode a file")
+    showQrUi()
     ensureRs().catch((e) => console.warn("RS preload failed", e))
     setStatus("")
   }catch(err){
@@ -2106,6 +2106,7 @@ function bootQr(){
     if(typeof window.__particlPaintCloud === "function"){
       window.__particlPaintCloud("PartiCl fallback")
     }
+    if(canvasWrap) canvasWrap.classList.remove("is-booting")
   }
 }
 if(document.readyState === "loading"){
