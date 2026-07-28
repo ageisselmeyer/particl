@@ -139,6 +139,8 @@ html.standalone .tagline{
 .app-scroll{
   flex: 1;
   min-height: 0;
+  display: flex;
+  flex-direction: column;
   overflow-y: auto;
   overflow-x: hidden;
   overscroll-behavior: contain;
@@ -150,18 +152,24 @@ html.standalone .tagline{
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: flex-start;
+  justify-content: center;
   padding: 8px 16px 12px;
-  flex: 1;
-  min-height: 0;
+  flex: 1 0 auto;
+  min-height: 100%;
+  box-sizing: border-box;
 }
 
 .media-stage{
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: stretch;
+  justify-content: flex-start;
   width: min(440px, 92vw);
   max-width: 100%;
+  flex-shrink: 0;
+  /* Progress strip always reserved so decode UI does not shift the square up. */
+  --media-progress-h: 42px;
 }
 
 .app-details{
@@ -359,11 +367,16 @@ button:active{
 #decodeProgressWrap{
   width: 100%;
   margin-top: 10px;
+  min-height: var(--media-progress-h, 42px);
   text-align: left;
+  box-sizing: border-box;
 }
 
+/* Keep layout height when inactive so QR / camera tops stay aligned. */
 #decodeProgressWrap[hidden]{
-  display: none !important;
+  display: block !important;
+  visibility: hidden;
+  pointer-events: none;
 }
 
 #decodeProgressBarBg{
@@ -392,6 +405,12 @@ button:active{
   width: 100%;
   margin-top: 10px;
   text-align: left;
+  /* Overlay below the stage so opening debug does not nudge the media square. */
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 2;
 }
 
 .debug-panel[hidden]{
