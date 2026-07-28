@@ -43,99 +43,107 @@
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icon.svg">
 <title>PartiCl</title>
-<link rel="stylesheet" href="styles.css?v=641025">
+<link rel="stylesheet" href="styles.css?v=641028">
 </head>
 <body>
   <div id="app" class="app">
     <header class="app-header">
       <h1>PartiCl</h1>
-      <p class="tagline">Particle Cloud Transfer · <span id="buildId">641025</span></p>
+      <p class="tagline">Particle Cloud Transfer · <span id="buildId">641029</span></p>
     </header>
 
     <main class="app-scroll">
       <div class="content-area">
-        <div id="canvasWrap" class="tx-paper is-booting">
-          <canvas id="cloud" aria-label="QR modules"></canvas>
-          <img id="qrImg" hidden alt="" width="1024" height="1024">
-          <canvas id="qrCanvas" hidden aria-hidden="true"></canvas>
-          <div id="alignFrame" hidden aria-hidden="true">
-            <span class="align-mark align-tl"></span>
-            <span class="align-mark align-tr"></span>
-            <span class="align-mark align-br"></span>
-            <span class="align-mark align-bl"></span>
-          </div>
-        </div>
+        <div class="media-stage">
+          <div id="mediaViewport" class="media-viewport">
+            <div id="canvasWrap" class="tx-paper is-booting">
+              <canvas id="cloud" aria-label="QR modules"></canvas>
+              <img id="qrImg" hidden alt="" width="1024" height="1024">
+              <canvas id="qrCanvas" hidden aria-hidden="true"></canvas>
+              <div id="alignFrame" hidden aria-hidden="true">
+                <span class="align-mark align-tl"></span>
+                <span class="align-mark align-tr"></span>
+                <span class="align-mark align-br"></span>
+                <span class="align-mark align-bl"></span>
+              </div>
+            </div>
 
-        <div id="videoWrap" hidden>
-          <video id="video" autoplay playsinline muted></video>
-          <div id="decodeOverlay" aria-hidden="true">
-            <div id="lockQuad"></div>
+            <div id="videoWrap" hidden>
+              <video id="video" autoplay playsinline muted></video>
+              <div id="decodeOverlay" aria-hidden="true">
+                <div id="lockQuad"></div>
+              </div>
+            </div>
+          </div>
+
+          <div id="decodeProgressWrap" hidden>
+            <div id="decodeProgressBarBg">
+              <div id="decodeProgressBar"></div>
+            </div>
+            <div id="decodeProgressText"></div>
+          </div>
+
+          <div id="decodeDebugPanel" class="debug-panel" hidden>
+            <div id="decodePipeline" aria-live="polite">
+              <div id="decodePipeFrames"></div>
+              <div id="decodePipeWorkers"></div>
+              <div id="decodePipeBalance"></div>
+            </div>
+            <pre id="decodeDebug" aria-live="polite"></pre>
+            <div id="decodeMeters" aria-live="polite">
+              <div class="meterRow">
+                <div class="meterHead">
+                  <span class="meterLabel">QR view</span>
+                  <span class="meterValue" id="meterAlignVal">0%</span>
+                </div>
+                <div class="meterTrack"><div class="meterFill" id="meterAlignFill"></div></div>
+              </div>
+              <div class="meterRow">
+                <div class="meterHead">
+                  <span class="meterLabel">QR lock</span>
+                  <span class="meterValue" id="meterSyncVal">waiting</span>
+                </div>
+                <div class="meterTrack">
+                  <div class="meterFill meterFillSync" id="meterSyncFill"></div>
+                  <div class="meterPeak" id="meterSyncPeak"></div>
+                </div>
+              </div>
+              <div class="meterRow">
+                <div class="meterHead">
+                  <span class="meterLabel">Decoder</span>
+                  <span class="meterValue" id="meterContrastVal">—</span>
+                </div>
+                <div class="meterTrack"><div class="meterFill" id="meterContrastFill"></div></div>
+              </div>
+              <div class="meterRow">
+                <div class="meterHead">
+                  <span class="meterLabel">Transfer</span>
+                  <span class="meterValue" id="meterCrcVal">waiting</span>
+                </div>
+                <div class="meterTrack">
+                  <div class="meterFill meterFillCrc" id="meterCrcFill"></div>
+                  <div class="meterPeak" id="meterCrcPeak"></div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
 
       <div class="app-details">
-        <div id="decodeProgressWrap" hidden>
-          <div id="decodeProgressBarBg">
-            <div id="decodeProgressBar"></div>
-          </div>
-          <div id="decodeProgressText"></div>
-          <div id="decodePipeline" aria-live="polite">
-            <div id="decodePipeFrames"></div>
-            <div id="decodePipeWorkers"></div>
-            <div id="decodePipeBalance"></div>
-          </div>
-        </div>
-
-        <pre id="decodeDebug" hidden aria-live="polite"></pre>
-
         <p id="status"></p>
         <a id="download" hidden>Download recovered file</a>
-
-        <div id="decodeMeters" hidden aria-live="polite">
-          <div class="meterRow">
-            <div class="meterHead">
-              <span class="meterLabel">QR view</span>
-              <span class="meterValue" id="meterAlignVal">0%</span>
-            </div>
-            <div class="meterTrack"><div class="meterFill" id="meterAlignFill"></div></div>
-          </div>
-          <div class="meterRow">
-            <div class="meterHead">
-              <span class="meterLabel">QR lock</span>
-              <span class="meterValue" id="meterSyncVal">waiting</span>
-            </div>
-            <div class="meterTrack">
-              <div class="meterFill meterFillSync" id="meterSyncFill"></div>
-              <div class="meterPeak" id="meterSyncPeak"></div>
-            </div>
-          </div>
-          <div class="meterRow">
-            <div class="meterHead">
-              <span class="meterLabel">Decoder</span>
-              <span class="meterValue" id="meterContrastVal">—</span>
-            </div>
-            <div class="meterTrack"><div class="meterFill" id="meterContrastFill"></div></div>
-          </div>
-          <div class="meterRow">
-            <div class="meterHead">
-              <span class="meterLabel">Transfer</span>
-              <span class="meterValue" id="meterCrcVal">waiting</span>
-            </div>
-            <div class="meterTrack">
-              <div class="meterFill meterFillCrc" id="meterCrcFill"></div>
-              <div class="meterPeak" id="meterCrcPeak"></div>
-            </div>
-          </div>
-        </div>
       </div>
     </main>
 
     <nav class="bottom-bar" aria-label="PartiCl actions">
       <input type="file" id="fileInput" hidden>
-      <div id="modeButtons" class="buttons">
-        <button type="button" id="btnEncode">Encode</button>
-        <button type="button" id="btnDecode">Decode</button>
+      <div class="bottom-actions">
+        <div id="modeButtons" class="buttons">
+          <button type="button" id="btnEncode">Encode</button>
+          <button type="button" id="btnDecode">Decode</button>
+        </div>
+        <button type="button" id="btnDebug" hidden aria-pressed="false">Debug</button>
       </div>
     </nav>
   </div>
@@ -290,6 +298,6 @@
     var st = document.getElementById("status");
     if(st) st.textContent = "";
   </script>
-  <script type="module" src="app-qr.js?v=641023"></script>
+  <script type="module" src="app-qr.js?v=641029"></script>
 </body>
 </html>

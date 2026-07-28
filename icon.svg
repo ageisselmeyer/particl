@@ -2,79 +2,72 @@
   <rect width="512" height="512" rx="96" fill="#ffffff"/>
 
   <g fill="#000000" transform="translate(-4 14) translate(256 256) scale(1.30) translate(-256 -256)">
-    <!-- top half — same stagger/spacing as bottom rows -->
-    <circle cx="132" cy="136" r="5"/>
-    <circle cx="160" cy="126" r="7"/>
-    <circle cx="188" cy="138" r="6"/>
-    <circle cx="216" cy="130" r="5"/>
-    <circle cx="244" cy="142" r="8"/>
-    <circle cx="272" cy="134" r="6"/>
-    <circle cx="300" cy="146" r="5"/>
-    <circle cx="328" cy="136" r="7"/>
-    <circle cx="356" cy="148" r="6"/>
-    <circle cx="384" cy="140" r="5"/>
-
-    <circle cx="148" cy="180" r="7"/>
-    <circle cx="176" cy="170" r="5"/>
-    <circle cx="204" cy="182" r="6"/>
-    <circle cx="232" cy="174" r="8"/>
+    <circle cx="132" cy="142" r="5"/>
+    <circle cx="160" cy="131" r="7"/>
+    <circle cx="188" cy="141" r="6"/>
+    <circle cx="216" cy="132" r="5"/>
+    <circle cx="244" cy="143" r="8"/>
+    <circle cx="272" cy="133" r="6"/>
+    <circle cx="300" cy="144" r="5"/>
+    <circle cx="328" cy="133" r="7"/>
+    <circle cx="356" cy="143" r="6"/>
+    <circle cx="384" cy="134" r="5"/>
+    <circle cx="148" cy="185" r="7"/>
+    <circle cx="176" cy="174" r="5"/>
+    <circle cx="204" cy="185" r="6"/>
+    <circle cx="232" cy="175" r="8"/>
     <circle cx="260" cy="186" r="5"/>
-    <circle cx="288" cy="178" r="7"/>
-    <circle cx="316" cy="190" r="6"/>
-    <circle cx="344" cy="180" r="5"/>
-    <circle cx="372" cy="192" r="7"/>
-
-    <!-- bottom half (unchanged) -->
-    <circle cx="118" cy="224" r="6"/>
-    <circle cx="146" cy="214" r="5"/>
-    <circle cx="174" cy="226" r="7"/>
-    <circle cx="202" cy="218" r="5"/>
-    <circle cx="230" cy="228" r="6"/>
+    <circle cx="288" cy="177" r="7"/>
+    <circle cx="316" cy="187" r="6"/>
+    <circle cx="344" cy="176" r="5"/>
+    <circle cx="372" cy="187" r="7"/>
+    <circle cx="118" cy="231" r="6"/>
+    <circle cx="146" cy="219" r="5"/>
+    <circle cx="174" cy="230" r="7"/>
+    <circle cx="202" cy="221" r="5"/>
+    <circle cx="230" cy="229" r="6"/>
     <circle cx="258" cy="220" r="8"/>
-    <circle cx="286" cy="232" r="5"/>
-    <circle cx="314" cy="224" r="7"/>
-    <circle cx="342" cy="236" r="6"/>
-    <circle cx="370" cy="226" r="5"/>
-    <circle cx="398" cy="238" r="7"/>
-
-    <circle cx="132" cy="268" r="5"/>
-    <circle cx="160" cy="258" r="7"/>
-    <circle cx="188" cy="270" r="6"/>
-    <circle cx="216" cy="262" r="5"/>
-    <circle cx="244" cy="274" r="8"/>
-    <circle cx="272" cy="266" r="6"/>
-    <circle cx="300" cy="278" r="5"/>
-    <circle cx="328" cy="268" r="7"/>
-    <circle cx="356" cy="280" r="6"/>
-    <circle cx="384" cy="272" r="5"/>
-
-    <circle cx="148" cy="318" r="7"/>
-    <circle cx="176" cy="308" r="5"/>
-    <circle cx="204" cy="320" r="6"/>
-    <circle cx="232" cy="312" r="8"/>
+    <circle cx="286" cy="231" r="5"/>
+    <circle cx="314" cy="221" r="7"/>
+    <circle cx="342" cy="232" r="6"/>
+    <circle cx="370" cy="221" r="5"/>
+    <circle cx="398" cy="231" r="7"/>
+    <circle cx="132" cy="274" r="5"/>
+    <circle cx="160" cy="263" r="7"/>
+    <circle cx="188" cy="273" r="6"/>
+    <circle cx="216" cy="264" r="5"/>
+    <circle cx="244" cy="275" r="8"/>
+    <circle cx="272" cy="265" r="6"/>
+    <circle cx="300" cy="276" r="5"/>
+    <circle cx="328" cy="265" r="7"/>
+    <circle cx="356" cy="275" r="6"/>
+    <circle cx="384" cy="266" r="5"/>
+    <circle cx="148" cy="323" r="7"/>
+    <circle cx="176" cy="312" r="5"/>
+    <circle cx="204" cy="323" r="6"/>
+    <circle cx="232" cy="313" r="8"/>
     <circle cx="260" cy="324" r="5"/>
-    <circle cx="288" cy="316" r="7"/>
-    <circle cx="316" cy="328" r="6"/>
-    <circle cx="344" cy="318" r="5"/>
-    <circle cx="372" cy="330" r="7"/>
-
-    <circle cx="164" cy="364" r="6"/>
-    <circle cx="192" cy="354" r="5"/>
-    <circle cx="220" cy="366" r="7"/>
-    <circle cx="248" cy="358" r="6"/>
-    <circle cx="276" cy="370" r="8"/>
-    <circle cx="304" cy="362" r="5"/>
-    <circle cx="332" cy="374" r="6"/>
-    <circle cx="360" cy="364" r="7"/>
+    <circle cx="288" cy="315" r="7"/>
+    <circle cx="316" cy="325" r="6"/>
+    <circle cx="344" cy="314" r="5"/>
+    <circle cx="372" cy="325" r="7"/>
+    <circle cx="164" cy="369" r="6"/>
+    <circle cx="192" cy="357" r="5"/>
+    <circle cx="220" cy="368" r="7"/>
+    <circle cx="248" cy="359" r="6"/>
+    <circle cx="276" cy="369" r="8"/>
+    <circle cx="304" cy="360" r="5"/>
+    <circle cx="332" cy="371" r="6"/>
+    <circle cx="360" cy="359" r="7"/>
   </g>
 
   <g fill="#000000" opacity="0.22" transform="translate(-4 14) translate(256 256) scale(1.30) translate(-256 -256)">
-    <circle cx="288" cy="158" r="3"/>
-    <circle cx="196" cy="168" r="3"/>
-    <circle cx="352" cy="196" r="3"/>
+    <circle cx="288" cy="157" r="3"/>
+    <circle cx="196" cy="171" r="3"/>
+    <circle cx="352" cy="192" r="3"/>
     <circle cx="268" cy="252" r="3"/>
-    <circle cx="184" cy="296" r="3"/>
-    <circle cx="312" cy="344" r="3"/>
-    <circle cx="236" cy="388" r="3"/>
+    <circle cx="184" cy="300" r="3"/>
+    <circle cx="312" cy="341" r="3"/>
+    <circle cx="236" cy="389" r="3"/>
   </g>
 </svg>

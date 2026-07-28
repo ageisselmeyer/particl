@@ -146,12 +146,22 @@ html.standalone .tagline{
 }
 
 .content-area{
-  min-height: min(100%, 100%);
   width: 100%;
   display: flex;
+  flex-direction: column;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   padding: 8px 16px 12px;
+  flex: 1;
+  min-height: 0;
+}
+
+.media-stage{
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  width: min(440px, 92vw);
+  max-width: 100%;
 }
 
 .app-details{
@@ -176,6 +186,13 @@ html.standalone .tagline{
   border-top-color: transparent;
 }
 
+.bottom-actions{
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 48px;
+}
+
 .buttons{
   display: flex;
   justify-content: center;
@@ -190,6 +207,19 @@ html.standalone .tagline{
 #modeButtons.is-hidden{
   visibility: hidden;
   pointer-events: none;
+}
+
+.bottom-actions:has(#btnDebug:not([hidden])) #modeButtons{
+  display: none;
+}
+
+#btnDebug[hidden]{
+  display: none !important;
+}
+
+#btnDebug[aria-pressed="true"]{
+  background: rgba(10, 132, 255, 0.22);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 0 0 1px rgba(100, 210, 255, 0.35);
 }
 
 button{
@@ -216,15 +246,30 @@ button:active{
   transform: translateY(0);
 }
 
-/* --- QR / video stage --- */
-#canvasWrap{
+.media-viewport{
   position: relative;
-  width: min(440px, 92vw);
+  width: 100%;
   aspect-ratio: 1 / 1;
-  border-radius: 28px;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.06), 0 30px 80px rgba(0, 40, 80, 0.35);
+}
+
+.media-viewport.mode-decode #canvasWrap{
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* --- QR / video stage (stacked in .media-viewport) --- */
+#canvasWrap{
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  border-radius: inherit;
   overflow: hidden;
   background: #000;
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.06), 0 30px 80px rgba(0, 40, 80, 0.35);
 }
 
 #canvasWrap.tx-cloud{
@@ -234,8 +279,7 @@ button:active{
 
 #canvasWrap.tx-paper{
   background: #fff;
-  border-radius: 12px;
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.12), 0 30px 80px rgba(0, 0, 0, 0.18);
+  box-shadow: none;
 }
 
 #cloud{
@@ -273,19 +317,27 @@ button:active{
 .align-bl{ bottom: 4%; left: 4%; border-right: none; border-top: none; border-radius: 0 0 0 4px; }
 
 #videoWrap{
-  position: relative;
-  width: min(440px, 92vw);
-  aspect-ratio: 1 / 1;
-  border-radius: 20px;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  border-radius: inherit;
   overflow: hidden;
   background: #000;
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
+  box-shadow: none;
+}
+
+#videoWrap[hidden]{
+  display: none !important;
 }
 
 #video{
+  display: block;
   width: 100%;
   height: 100%;
   object-fit: cover;
+  object-position: center center;
 }
 
 #decodeOverlay{
@@ -306,8 +358,12 @@ button:active{
 /* --- decode details --- */
 #decodeProgressWrap{
   width: 100%;
-  margin-top: 4px;
+  margin-top: 10px;
   text-align: left;
+}
+
+#decodeProgressWrap[hidden]{
+  display: none !important;
 }
 
 #decodeProgressBarBg{
@@ -332,8 +388,18 @@ button:active{
   color: var(--muted);
 }
 
-#decodePipeline{
+.debug-panel{
+  width: 100%;
   margin-top: 10px;
+  text-align: left;
+}
+
+.debug-panel[hidden]{
+  display: none !important;
+}
+
+#decodePipeline{
+  margin-top: 0;
   text-align: left;
   font: 12px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-variant-numeric: tabular-nums;
@@ -352,7 +418,7 @@ button:active{
 
 #decodeDebug{
   width: 100%;
-  margin-top: 12px;
+  margin-top: 10px;
   padding: 8px 10px;
   text-align: left;
   font: 11px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -367,6 +433,14 @@ button:active{
 }
 
 #decodeDebug[hidden]{ display: none !important; }
+
+#decodeMeters{
+  width: 100%;
+  margin-top: 10px;
+  text-align: left;
+}
+
+#decodeMeters[hidden]{ display: none !important; }
 
 #status{
   margin: 12px 0 0;
@@ -394,14 +468,6 @@ button:active{
 .app-details{
   text-align: center;
 }
-
-#decodeMeters{
-  width: 100%;
-  margin-top: 14px;
-  text-align: left;
-}
-
-#decodeMeters[hidden]{ display: none !important; }
 
 .meterRow + .meterRow{ margin-top: 10px; }
 
@@ -463,8 +529,7 @@ button:active{
 @media (max-width: 480px){
   h1{ font-size: 22px; }
 
-  #canvasWrap,
-  #videoWrap{
+  .media-stage{
     width: min(400px, 94vw);
   }
 

@@ -39,6 +39,7 @@ let rsEncode = null
 let rsDecodeErasures = null
 
 const canvasWrap = document.getElementById("canvasWrap")
+const mediaViewport = document.getElementById("mediaViewport")
 const cloudCanvas = document.getElementById("cloud")
 // Cyan align brackets are XOR-only — never show on default boot (avoids startup flash).
 const alignFrameEl = document.getElementById("alignFrame")
@@ -58,7 +59,9 @@ const decodePipeFrames = document.getElementById("decodePipeFrames")
 const decodePipeWorkers = document.getElementById("decodePipeWorkers")
 const decodePipeBalance = document.getElementById("decodePipeBalance")
 const decodeDebugEl = document.getElementById("decodeDebug")
+const decodeDebugPanel = document.getElementById("decodeDebugPanel")
 const decodeMetersEl = document.getElementById("decodeMeters")
+const btnDebug = document.getElementById("btnDebug")
 const meterAlignFill = document.getElementById("meterAlignFill")
 const meterAlignVal = document.getElementById("meterAlignVal")
 const meterSyncFill = document.getElementById("meterSyncFill")
@@ -76,6 +79,14 @@ document.getElementById("btnEncode").addEventListener("click", () => {
   fileInput.click()
 })
 document.getElementById("btnDecode").addEventListener("click", () => startDecoder())
+if(btnDebug){
+  btnDebug.addEventListener("click", () => {
+    const open = btnDebug.getAttribute("aria-pressed") !== "true"
+    btnDebug.setAttribute("aria-pressed", open ? "true" : "false")
+    btnDebug.textContent = open ? "Hide debug" : "Debug"
+    if(decodeDebugPanel) decodeDebugPanel.hidden = !open
+  })
+}
 fileInput.addEventListener("change", () => {
   if(fileInput.files?.[0]) encodeFile(fileInput.files[0])
 })
@@ -680,7 +691,7 @@ function workersBusy(){
 function ensureDecodeWorkers(){
   if(decodeWorkers.length) return
   const url = new URL("decode-worker.js", import.meta.url)
-  url.searchParams.set("v", "641023")
+  url.searchParams.set("v", "641029")
   for(let i = 0; i < DECODE_WORKER_COUNT; i++){
     try{
       const w = new Worker(url)
@@ -1292,6 +1303,20 @@ async function prerenderTxFrames(texts){
   return txBitmaps.length === texts.length
 }
 
+function setDecodeUi(active){
+  if(mediaViewport) mediaViewport.classList.toggle("mode-decode", !!active)
+  if(videoWrap) videoWrap.hidden = !active
+  if(progressWrap) progressWrap.hidden = !active
+  if(btnDebug) btnDebug.hidden = !active
+  if(!active){
+    if(btnDebug){
+      btnDebug.setAttribute("aria-pressed", "false")
+      btnDebug.textContent = "Debug"
+    }
+    if(decodeDebugPanel) decodeDebugPanel.hidden = true
+  }
+}
+
 function showQrUi(){
   if(qrImg) qrImg.hidden = true
   if(cloudCanvas){
@@ -1301,8 +1326,7 @@ function showQrUi(){
   }
   if(alignFrameEl) alignFrameEl.hidden = true
   setPlainPaperStyle()
-  canvasWrap.style.display = ""
-  videoWrap.hidden = true
+  setDecodeUi(false)
 }
 
 /** Plan one MDS generation: any k of n packets (≈80%) recover byteLen bytes. */
@@ -1495,7 +1519,7 @@ function tickTx(now){
     else blitTxBitmap(frameIndex)
     if(now - txStatusAt > 200){
       txStatusAt = now
-      setStatus(`Noise(${noiseMode}) frame ${frameIndex + 1} / ${frames.length} · “${meta?.name || "file"}”`)
+      setStatus(`Frame ${frameIndex + 1} / ${frames.length} · “${meta?.name || "file"}”`)
     }
   }
 }
@@ -1966,9 +1990,7 @@ async function startDecoder(){
   clearTxBitmaps()
   if(txRaf) cancelAnimationFrame(txRaf)
   modeButtons.classList.add("is-hidden")
-  canvasWrap.style.display = "none"
-  videoWrap.hidden = false
-  progressWrap.hidden = false
+  setDecodeUi(true)
   downloadLink.hidden = true
   resetRxState()
   resetDecodeQuality()
@@ -1984,8 +2006,7 @@ async function startDecoder(){
       "Rates     cam  0/s · decode  0/s · hit  0/s (  0%) · drops   0"
     ].join("\n")
   }
-  if(decodeMetersEl) decodeMetersEl.hidden = false
-  if(decodeDebugEl) decodeDebugEl.hidden = false
+  if(decodeDebugPanel) decodeDebugPanel.hidden = true
   lastQrText = ""
   qrHitStreak = 0
   qrMissStreak = 0
@@ -2018,8 +2039,7 @@ async function startDecoder(){
     }catch(__){
       setStatus("Could not access camera.")
       modeButtons.classList.remove("is-hidden")
-      canvasWrap.style.display = ""
-      videoWrap.hidden = true
+      setDecodeUi(false)
       return
     }
   }
