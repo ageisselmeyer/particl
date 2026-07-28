@@ -5,10 +5,5 @@
 .Spotlight-V100
 .Trashes
 Screenshot*.png
-_experiments/
+_shot/
 certs/
-master.md
-particl.jpg
-python/
-serve-https.py
-stat-channel.js

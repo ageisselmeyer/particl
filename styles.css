@@ -280,11 +280,6 @@ button:active{
   background: #000;
 }
 
-#canvasWrap.tx-cloud{
-  background: radial-gradient(ellipse at 50% 45%, #0a1a2e 0%, #000 70%);
-  box-shadow: 0 0 0 1px rgba(80, 180, 255, 0.12), 0 30px 80px rgba(0, 40, 80, 0.45);
-}
-
 #canvasWrap.tx-paper{
   background: #fff;
   box-shadow: none;
@@ -297,32 +292,6 @@ button:active{
   touch-action: none;
   background: #fff;
 }
-
-#qrImg,
-#qrCanvas{
-  display: none;
-}
-
-#alignFrame{
-  display: none;
-  pointer-events: none;
-  position: absolute;
-  inset: 0;
-  z-index: 2;
-}
-
-.align-mark{
-  position: absolute;
-  width: 32px;
-  height: 32px;
-  border: 3px solid #5ac8fa;
-  box-shadow: 0 0 12px rgba(90, 200, 250, 0.55);
-}
-
-.align-tl{ top: 4%; left: 4%; border-right: none; border-bottom: none; border-radius: 4px 0 0 0; }
-.align-tr{ top: 4%; right: 4%; border-left: none; border-bottom: none; border-radius: 0 4px 0 0; }
-.align-br{ bottom: 4%; right: 4%; border-left: none; border-top: none; border-radius: 0 0 4px 0; }
-.align-bl{ bottom: 4%; left: 4%; border-right: none; border-top: none; border-radius: 0 0 0 4px; }
 
 #videoWrap{
   position: absolute;
@@ -346,21 +315,6 @@ button:active{
   height: 100%;
   object-fit: cover;
   object-position: center center;
-}
-
-#decodeOverlay{
-  pointer-events: none;
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-}
-
-#lockQuad{
-  position: absolute;
-  border: 2px solid rgba(90, 200, 250, 0.85);
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.4);
-  display: none;
-  box-sizing: border-box;
 }
 
 /* --- decode details --- */

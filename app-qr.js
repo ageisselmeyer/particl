@@ -1,6 +1,5 @@
 /**
  * PartiCl QR transfer mode — LT/Raptor-style fountain (global, rateless-ish).
- * Particle codec lives in app.js for later.
  * RS is loaded dynamically so a failed import cannot blank the boot cloud.
  */
 import {
@@ -12,22 +11,12 @@ import {
   countKnown
 } from "./fountain.js"
 import {
-  InvertibleNoiseFilter,
-  applyNoiseCpu,
-  invertCanvasBinary,
-  drawCyanFiducialsInMargin,
-  detectCyanQuad,
   detectBrightQuad,
   expandQuad,
   boxBlurRgba,
   warpQuadToSquare,
-  coverCropSquare,
-  NOISE_SCALE,
-  NOISE_SEED,
-  QR_MARGIN_FRAC,
-  CYAN_EXPAND
+  coverCropSquare
 } from "./qr-noise-filter.js"
-import { renderBallCloud } from "./qr-ball-cloud.js"
 import {
   stampFindersOnImageData,
   pickStampModuleCounts,
@@ -41,11 +30,6 @@ let rsDecodeErasures = null
 const canvasWrap = document.getElementById("canvasWrap")
 const mediaViewport = document.getElementById("mediaViewport")
 const cloudCanvas = document.getElementById("cloud")
-// Cyan align brackets are XOR-only — never show on default boot (avoids startup flash).
-const alignFrameEl = document.getElementById("alignFrame")
-if(alignFrameEl) alignFrameEl.hidden = true
-const qrImg = document.getElementById("qrImg")
-const qrCanvas = document.getElementById("qrCanvas")
 const fileInput = document.getElementById("fileInput")
 const modeButtons = document.getElementById("modeButtons")
 const statusEl = document.getElementById("status")
@@ -111,26 +95,14 @@ const QR_ECC = "Q"
 const QR_CELL = 10
 const QR_MARGIN = 8
 
-const NOISE_SEED_NORM = (NOISE_SEED % 10007) / 10007
-const PLAIN_QR = new URLSearchParams(location.search).has("plain")
 const URL_PARAMS = new URLSearchParams(location.search)
-/** Optional experimental invertible XOR — off by default (needs perfect lattice). */
-const USE_XOR_NOISE = !PLAIN_QR && URL_PARAMS.has("xor")
-/** Cyan corners only for XOR mode (or ?align=1). Default: none — jsQR uses finders. */
-const USE_CYAN_ALIGN = USE_XOR_NOISE
-  ? !URL_PARAMS.has("noalign")
-  : URL_PARAMS.has("align")
-/** Ball cloud only with ?cloud=1 (experimental, needs XOR). */
-const BALL_CLOUD = USE_XOR_NOISE && URL_PARAMS.has("cloud")
+const PLAIN_QR = URL_PARAMS.has("plain")
 /** Default look: polarity-preserving stipple (decodes like plain). */
-const STIPPLE_QR = !PLAIN_QR && !USE_XOR_NOISE
-/** Omit finders only with ?omitfinders=1 (experimental stamp path). */
+const STIPPLE_QR = !PLAIN_QR
+/** Optional: omit solid TX finders and stamp on RX (?omitfinders=1). */
 const OMIT_FINDERS = STIPPLE_QR && URL_PARAMS.has("omitfinders")
-/** Timing patterns are stippled with data (not solid, not left blank). */
 
-/** WebGL/CPU XOR only when ?xor=1. */
 let noiseMode = "off"
-let noiseFilter = null
 let restoreScratch = null
 let restoreScratchCtx = null
 let detectorScratch = null
@@ -138,79 +110,19 @@ let detectorScratch = null
 let rxStampModules = 0
 let stampProbeFrame = 0
 
-function getNoiseFilter(){
-  if(noiseFilter) return noiseFilter
-  try{
-    noiseFilter = new InvertibleNoiseFilter({
-      seed: NOISE_SEED,
-      scale: NOISE_SCALE,
-      strength: 1
-    })
-    return noiseFilter
-  }catch(e){
-    console.warn("WebGL noise filter unavailable", e)
-    return null
-  }
-}
-
 function applyTxNoiseFilter(){
   if(!cloudCanvas) return false
-  const w = cloudCanvas.width
-  const h = cloudCanvas.height
-  if(w < 8 || h < 8) return false
-  const ctx = cloudCanvas.getContext("2d")
-  if(!ctx) return false
-  try{
-    if(PLAIN_QR){
-      noiseMode = "plain"
-      setPlainPaperStyle()
-      return true
-    }
-    if(!USE_XOR_NOISE){
-      // Stipple already painted — no XOR, no cyan. Decode path stamps finders if omitted.
-      noiseMode = STIPPLE_QR
-        ? (OMIT_FINDERS ? "stipple-nofinders" : "stipple")
-        : "solid"
-      setPlainPaperStyle()
-      return true
-    }
-    applyNoiseCpu(ctx, w, h, {
-      scale: NOISE_SCALE,
-      seed: NOISE_SEED_NORM,
-      strength: 1,
-      threshold: 114.75
-    })
-    noiseMode = "xor"
-    if(BALL_CLOUD){
-      const binary = ctx.getImageData(0, 0, w, h)
-      const cloud = renderBallCloud(binary, w, h, { seed: NOISE_SEED, noiseScale: NOISE_SCALE })
-      ctx.putImageData(cloud, 0, 0)
-      noiseMode += "+cloud"
-    }else{
-      invertCanvasBinary(ctx, w, h)
-      noiseMode += "+dots"
-    }
-    setPlainPaperStyle()
-    if(USE_CYAN_ALIGN) drawCyanFiducialsInMargin(ctx, cloudCanvas.width, cloudCanvas.height)
-    return true
-  }catch(e){
-    console.warn("noise filter failed", e)
-    noiseMode = "off"
-    return false
-  }
+  noiseMode = PLAIN_QR ? "plain" : (OMIT_FINDERS ? "stipple-nofinders" : "stipple")
+  setPlainPaperStyle()
+  return true
 }
 
 function setPlainPaperStyle(){
   if(canvasWrap){
-    canvasWrap.classList.remove("tx-cloud")
     canvasWrap.classList.add("tx-paper")
     canvasWrap.style.background = "#fff"
   }
   if(cloudCanvas) cloudCanvas.style.background = "#fff"
-}
-
-function setCloudPaperStyle(){
-  setPlainPaperStyle()
 }
 
 function ensureRestoreScratch(w, h){
@@ -226,8 +138,7 @@ function ensureRestoreScratch(w, h){
 }
 
 /**
- * One camera grab → warp (paper/cyan) → optional XOR unfilter.
- * Finder-stamp mode needs a rectified square first — stamped finders are axis-aligned.
+ * One camera grab → optional paper warp for finder-stamp mode.
  */
 function captureRestoreVariants(outSize = 1024){
   if(!video.videoWidth) return null
@@ -238,11 +149,7 @@ function captureRestoreVariants(outSize = 1024){
   const raw = cctx.getImageData(0, 0, capSize, capSize)
   let quad = null
   let align = "cover"
-  if(USE_CYAN_ALIGN && USE_XOR_NOISE){
-    quad = detectCyanQuad(raw.data, capSize, capSize)
-    if(quad) align = "cyan"
-  }else if(OMIT_FINDERS){
-    // White paper on dark UI — warp to square before stamping finders.
+  if(OMIT_FINDERS){
     quad = detectBrightQuad(raw.data, capSize, capSize, 160)
       || detectBrightQuad(raw.data, capSize, capSize, 140)
     if(quad) align = "paper"
@@ -250,8 +157,7 @@ function captureRestoreVariants(outSize = 1024){
 
   let aligned
   if(quad){
-    const expand = align === "paper" ? 1.012 : CYAN_EXPAND
-    quad = expandQuad(quad, expand)
+    quad = expandQuad(quad, 1.012)
     aligned = warpQuadToSquare(raw.data, capSize, capSize, quad, outSize)
   }else if(capSize === outSize){
     aligned = raw
@@ -262,51 +168,11 @@ function captureRestoreVariants(outSize = 1024){
   }
 
   const src = new ImageData(new Uint8ClampedArray(aligned.data), outSize, outSize)
-  if(USE_XOR_NOISE) boxBlurRgba(src.data, outSize, outSize, BALL_CLOUD ? 2 : 1)
-  else if(OMIT_FINDERS) boxBlurRgba(src.data, outSize, outSize, 1)
+  if(OMIT_FINDERS) boxBlurRgba(src.data, outSize, outSize, 1)
 
   decodeDbg.align = align
   decodeDbg.quad = quad ? "yes" : "no"
-
-  // Default stipple / plain: no XOR unfilter — jsQR reads finders (stamped or real).
-  if(PLAIN_QR || !USE_XOR_NOISE){
-    return { align, quad: !!quad, otsu: src, t127: src }
-  }
-
-  const baseOpts = {
-    scale: NOISE_SCALE,
-    seed: NOISE_SEED_NORM,
-    strength: 1,
-    cellAvg: BALL_CLOUD,
-    darkOnLight: true
-  }
-
-  const otsu = applyNoiseCpu(
-    { data: new Uint8ClampedArray(src.data), width: outSize, height: outSize },
-    outSize, outSize, { ...baseOpts, threshold: 127 }
-  )
-  const t127 = applyNoiseCpu(
-    { data: new Uint8ClampedArray(src.data), width: outSize, height: outSize },
-    outSize, outSize, { ...baseOpts, threshold: 114.75 }
-  )
-  if(USE_CYAN_ALIGN){
-    paintMarginWhite(otsu.data, outSize, outSize, QR_MARGIN_FRAC)
-    paintMarginWhite(t127.data, outSize, outSize, QR_MARGIN_FRAC)
-  }
-
-  return { align, quad: !!quad, otsu, t127 }
-}
-
-function paintMarginWhite(data, w, h, marginFrac = QR_MARGIN_FRAC){
-  const inset = Math.max(1, Math.round(Math.min(w, h) * marginFrac))
-  for(let y = 0; y < h; y++){
-    for(let x = 0; x < w; x++){
-      if(x >= inset && y >= inset && x < w - inset && y < h - inset) continue
-      const i = (y * w + x) * 4
-      data[i] = data[i + 1] = data[i + 2] = 255
-      data[i + 3] = 255
-    }
-  }
+  return { align, quad: !!quad, otsu: src, t127: src }
 }
 
 /** Local canvas → jsQR check (no camera). Works for plain + stipple. */
@@ -320,35 +186,23 @@ function verifyTxCanvasDecodable(){
   const ctx = cloudCanvas.getContext("2d")
   if(!ctx) return null
   const src = ctx.getImageData(0, 0, w, h)
-  if(USE_XOR_NOISE){
-    const restored = applyNoiseCpu(
-      { data: new Uint8ClampedArray(src.data), width: w, height: h },
-      w, h, {
-        scale: NOISE_SCALE,
-        seed: NOISE_SEED_NORM,
-        strength: 1,
-        threshold: 127,
-        darkOnLight: true,
-        cellAvg: BALL_CLOUD
-      }
-    )
-    paintMarginWhite(restored.data, w, h)
-    return tryJsQROnImageData(jsQR, restored, w, h)
+  if(OMIT_FINDERS){
+    const prefer = moduleCountForVersion(window.__particlQrType | 0)
+      || estimateModuleCountFromTiming(src, 4)
+    for(const nMod of pickStampModuleCounts(0, 0, 4, prefer)){
+      const stamped = stampFindersOnImageData(src, nMod, 4)
+      const hit = tryJsQROnImageData(jsQR, stamped, w, h)
+      if(hit) return hit
+    }
+    return null
   }
   return tryJsQROnImageData(jsQR, src, w, h)
 }
 
-/** @deprecated — XOR-only; use verifyTxCanvasDecodable */
-function verifyTxNoiseRoundtrip(){
-  if(PLAIN_QR || !USE_XOR_NOISE) return verifyTxCanvasDecodable()
-  return verifyTxCanvasDecodable()
-}
-
-function restoreFrameForDecode(size = 1024, _preferCyan = false, threshold = "otsu"){
+function restoreFrameForDecode(size = 1024){
   const v = captureRestoreVariants(size)
   if(!v) return null
-  if(PLAIN_QR || !USE_XOR_NOISE) return threshold === 127 ? v.t127 : v.otsu
-  return threshold === 114.75 ? v.t127 : v.otsu
+  return v.otsu
 }
 
 let frames = [] // string payloads
@@ -691,7 +545,7 @@ function workersBusy(){
 function ensureDecodeWorkers(){
   if(decodeWorkers.length) return
   const url = new URL("decode-worker.js", import.meta.url)
-  url.searchParams.set("v", "641032")
+  url.searchParams.set("v", "641038")
   for(let i = 0; i < DECODE_WORKER_COUNT; i++){
     try{
       const w = new Worker(url)
@@ -892,7 +746,7 @@ function updateDecodeProgressUi(forceBar){
     }else{
       progressText.textContent = useful > 0
         ? `${useful} / ?${fpsNote}`
-        : ((OMIT_FINDERS || USE_XOR_NOISE
+        : ((OMIT_FINDERS
           ? `Waiting for QR… · warp ${decodeDbg.align || "—"} · quad ${decodeDbg.quad || "?"}`
           : "Waiting for QR…") + fpsNote)
     }
@@ -973,18 +827,11 @@ function captureFrameToQueue(){
       const stamped = stampFindersOnImageData(pack.otsu, nMod, 4)
       jobs.push({ img: stamped, dilate: 1, tryHarder: !rxStampModules })
     }
-  }else if(PLAIN_QR || !USE_XOR_NOISE){
+  }else{
     jobs = [
       { img: pack.otsu, dilate: 0, tryHarder: false },
       { img: pack.otsu, dilate: 1, tryHarder: true }
     ]
-  }else{
-    jobs = [
-      { img: pack.otsu, dilate: 1, tryHarder: false },
-      { img: pack.t127, dilate: 1, tryHarder: true },
-      { img: pack.otsu, dilate: 2, tryHarder: true }
-    ]
-    if(!pack.quad) jobs.push({ img: pack.t127, dilate: 2, tryHarder: true })
   }
 
   const room = Math.max(0, DECODE_QUEUE_MAX - decodeQueue.length)
@@ -999,14 +846,14 @@ async function scanNativeDetector(){
   if(!detector || !video.videoWidth) return null
   try{
     // Prefer detecting on the live video — Safari is better at this than our cover-crop.
-    if(PLAIN_QR || (!USE_XOR_NOISE && !OMIT_FINDERS)){
+    if(!OMIT_FINDERS){
       const live = await detector.detect(video)
       if(live && live.length){
         decodeDbg.engine = "BarcodeDetector+video"
         return live[0].rawValue || null
       }
     }
-    let img = restoreFrameForDecode(1024, false, (PLAIN_QR || !USE_XOR_NOISE) ? "otsu" : 127)
+    let img = restoreFrameForDecode(1024)
     if(!img) return null
     if(OMIT_FINDERS){
       const nMod = pickStampModuleCounts(rxStampModules, stampProbeFrame, 1)[0]
@@ -1033,7 +880,7 @@ function scanQrOnMainThread(){
   const hasZx = !!getZXing()
   if(!jsQR && !hasZx) return null
   if(!video.videoWidth) return null
-  let img = restoreFrameForDecode(1024, false, (PLAIN_QR || !USE_XOR_NOISE) ? "otsu" : 127)
+  let img = restoreFrameForDecode(1024)
   if(!img) return null
   if(OMIT_FINDERS){
     const ns = pickStampModuleCounts(rxStampModules, stampProbeFrame, rxStampModules ? 1 : 2)
@@ -1078,183 +925,13 @@ function scanQrOnMainThread(){
   return null
 }
 
-const CLOUD_PIXEL = 1024
-const PARTICLES_ON = 5
-const PARTICLES_FINDER = 9
-const PARTICLES_OFF = 0.02
-
-let cloudParticles = null
-let cloudMeta = null
-let cloudAnimT0 = 0
-
-function hash01local(a, b){
-  let x = Math.imul(a ^ (b * 0x9e3779b9), 0x85ebca6b) >>> 0
-  x ^= x >>> 16
-  x = Math.imul(x, 0xc2b2ae35) >>> 0
-  return ((x >>> 0) / 4294967296)
-}
-
-function isFinderCell(r, c, n){
-  const inPat = (rr, cc) => rr >= 0 && rr < 7 && cc >= 0 && cc < 7
-  return inPat(r, c) || inPat(r, c - (n - 7)) || inPat(r - (n - 7), c)
-}
-
-function buildQrMatrix(text){
-  const qrcode = getQrCode()
-  const qr = qrcode(0, QR_ECC)
-  qr.addData(String(text), "Byte")
-  qr.make()
-  return qr
-}
-
-/**
- * Watch-pairing style: the QR *is* a cloud of blue particles.
- * Keep modules sparse enough that the field stays dark (not a washed-out white square).
- */
-function spawnCloudFromText(text){
-  const qr = buildQrMatrix(text)
-  const n = qr.getModuleCount()
-  const particles = []
-  for(let r = 0; r < n; r++){
-    for(let c = 0; c < n; c++){
-      const on = qr.isDark(r, c)
-      const finder = on && isFinderCell(r, c, n)
-      const count = on
-        ? (finder ? PARTICLES_FINDER : PARTICLES_ON)
-        : (hash01local(r, c + 17) < PARTICLES_OFF ? 1 : 0)
-      for(let i = 0; i < count; i++){
-        const u = hash01local(r * 131 + c, i * 17 + 3)
-        const v = hash01local(c * 97 + r, i * 29 + 11)
-        const ox = (u - 0.5) * (on ? 0.45 : 0.8)
-        const oy = (v - 0.5) * (on ? 0.45 : 0.8)
-        particles.push({
-          r, c, on, finder,
-          ox, oy,
-          phase: u * Math.PI * 2,
-          spin: 0.5 + v * 1.1,
-          size: on ? (finder ? 0.95 : 0.65 + u * 0.25) : 0.28,
-          bright: on ? (finder ? 0.9 : 0.55 + v * 0.2) : 0.05
-        })
-      }
-    }
-  }
-  cloudParticles = particles
-  cloudMeta = { n, margin: 0.12 }
-  cloudAnimT0 = performance.now()
-  return { n, particles }
-}
-
-function ensureCloudCanvas(){
-  if(!cloudCanvas) throw new Error("cloud canvas missing")
-  cloudCanvas.hidden = false
-  cloudCanvas.style.display = "block"
-  cloudCanvas.style.background = "#fff"
-  // Fixed backing store. Do NOT pass {alpha:false} — if a 2d context was
-  // already created (classic boot script), mismatched attrs return null and
-  // leave a cleared white canvas.
-  if(cloudCanvas.width !== CLOUD_PIXEL || cloudCanvas.height !== CLOUD_PIXEL){
-    cloudCanvas.width = CLOUD_PIXEL
-    cloudCanvas.height = CLOUD_PIXEL
-  }
-  const ctx = cloudCanvas.getContext("2d")
-  if(!ctx) throw new Error("2d context unavailable")
-  return ctx
-}
-
-function paintParticleCloud(now){
-  const ctx = ensureCloudCanvas()
-  const W = cloudCanvas.width
-
-  // Always paint black first so a failed spawn never leaves a white bitmap
-  ctx.globalCompositeOperation = "source-over"
-  ctx.fillStyle = "#000000"
-  ctx.fillRect(0, 0, W, W)
-
-  if(!cloudParticles || !cloudMeta) return
-
-  const { n, margin } = cloudMeta
-  const t = ((now || performance.now()) - cloudAnimT0) * 0.001
-
-  const bg = ctx.createRadialGradient(W * 0.5, W * 0.48, W * 0.08, W * 0.5, W * 0.5, W * 0.7)
-  bg.addColorStop(0, "#071526")
-  bg.addColorStop(0.6, "#03080f")
-  bg.addColorStop(1, "#000000")
-  ctx.fillStyle = bg
-  ctx.fillRect(0, 0, W, W)
-
-  const field = W * (1 - 2 * margin)
-  const cell = field / n
-  const origin = W * margin
-
-  ctx.beginPath()
-  ctx.arc(W / 2, W / 2, field * 0.52, 0, Math.PI * 2)
-  ctx.strokeStyle = "rgba(60,150,255,0.1)"
-  ctx.lineWidth = Math.max(2, W * 0.006)
-  ctx.stroke()
-
-  // Soft discs per ON module (QR silhouette), then sparkle particles
-  ctx.globalCompositeOperation = "source-over"
-  const seen = new Set()
-  for(const p of cloudParticles){
-    if(!p.on) continue
-    const key = p.r * 1024 + p.c
-    if(seen.has(key)) continue
-    seen.add(key)
-    const x = origin + (p.c + 0.5) * cell
-    const y = origin + (p.r + 0.5) * cell
-    const rad = cell * (p.finder ? 0.42 : 0.34)
-    const g = ctx.createRadialGradient(x, y, 0, x, y, rad)
-    g.addColorStop(0, p.finder ? "rgba(200,236,255,0.95)" : "rgba(140,210,255,0.88)")
-    g.addColorStop(0.55, p.finder ? "rgba(40,160,255,0.75)" : "rgba(20,120,255,0.55)")
-    g.addColorStop(1, "rgba(0,30,80,0)")
-    ctx.fillStyle = g
-    ctx.beginPath()
-    ctx.arc(x, y, rad, 0, Math.PI * 2)
-    ctx.fill()
-  }
-
-  ctx.globalCompositeOperation = "lighter"
-  for(const p of cloudParticles){
-    const drift = p.on ? 0.08 : 0.15
-    const jx = Math.sin(t * p.spin + p.phase) * drift
-    const jy = Math.cos(t * (p.spin * 0.87) + p.phase * 1.3) * drift
-    const x = origin + (p.c + 0.5 + p.ox + jx) * cell
-    const y = origin + (p.r + 0.5 + p.oy + jy) * cell
-    const rad = Math.max(1.1, cell * 0.18 * p.size)
-    const g = ctx.createRadialGradient(x, y, 0, x, y, rad)
-    if(p.on){
-      g.addColorStop(0, `rgba(220,245,255,${0.7 * p.bright})`)
-      g.addColorStop(0.35, `rgba(80,190,255,${0.45 * p.bright})`)
-      g.addColorStop(1, "rgba(0,50,140,0)")
-    }else{
-      g.addColorStop(0, `rgba(80,160,255,${p.bright})`)
-      g.addColorStop(1, "rgba(0,40,100,0)")
-    }
-    ctx.fillStyle = g
-    ctx.beginPath()
-    ctx.arc(x, y, rad, 0, Math.PI * 2)
-    ctx.fill()
-  }
-
-  ctx.globalCompositeOperation = "source-over"
-}
-
-function cloudMarginFrac(){
-  return USE_CYAN_ALIGN ? QR_MARGIN_FRAC : 0
-}
-
 function drawQrToCanvas(text){
   window.__particlSolidModules = PLAIN_QR
   window.__particlStipple = STIPPLE_QR
   window.__particlOmitFinders = OMIT_FINDERS
-  window.__particlMarginFrac = cloudMarginFrac()
-  let painted = false
-  if(typeof window.__particlPaintCloud === "function"){
-    painted = !!window.__particlPaintCloud(text)
-  }
-  if(!painted){
-    spawnCloudFromText(text)
-    paintParticleCloud(performance.now())
+  window.__particlMarginFrac = 0
+  if(typeof window.__particlPaintCloud !== "function" || !window.__particlPaintCloud(text)){
+    throw new Error("QR paint failed")
   }
   applyTxNoiseFilter()
   if(canvasWrap) canvasWrap.classList.remove("is-booting")
@@ -1290,7 +967,7 @@ async function prerenderTxFrames(texts){
     window.__particlSolidModules = PLAIN_QR
     window.__particlStipple = STIPPLE_QR
     window.__particlOmitFinders = OMIT_FINDERS
-    window.__particlMarginFrac = cloudMarginFrac()
+    window.__particlMarginFrac = 0
     window.__particlPaintCloud(texts[i])
     applyTxNoiseFilter()
     const bmp = await createImageBitmap(cloudCanvas)
@@ -1318,13 +995,11 @@ function setDecodeUi(active){
 }
 
 function showQrUi(){
-  if(qrImg) qrImg.hidden = true
   if(cloudCanvas){
     cloudCanvas.hidden = false
     cloudCanvas.style.display = "block"
     cloudCanvas.style.background = "#fff"
   }
-  if(alignFrameEl) alignFrameEl.hidden = true
   setPlainPaperStyle()
   setDecodeUi(false)
 }
@@ -2109,7 +1784,7 @@ async function decodeLoop(){
   }
 }
 
-// Boot — keep the classic blue-on-black cloud (do not overwrite with washed particle RAF)
+// Boot idle QR on the canvas.
 function bootQr(){
   try{
     if(typeof (globalThis.qrcode || window.qrcode) !== "function"){
