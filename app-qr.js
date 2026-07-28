@@ -691,7 +691,7 @@ function workersBusy(){
 function ensureDecodeWorkers(){
   if(decodeWorkers.length) return
   const url = new URL("decode-worker.js", import.meta.url)
-  url.searchParams.set("v", "641029")
+  url.searchParams.set("v", "641032")
   for(let i = 0; i < DECODE_WORKER_COUNT; i++){
     try{
       const w = new Worker(url)
