@@ -2,18 +2,46 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<!-- Black splash immediately (PWA launch / Add to Home Screen). -->
+<style>
+  html {
+    background-color: #000000;
+    color-scheme: dark;
+  }
+  body {
+    margin: 0;
+    background-color: #000000;
+  }
+</style>
+<script>
+  if (
+    window.matchMedia("(display-mode: standalone)").matches ||
+    window.matchMedia("(display-mode: fullscreen)").matches ||
+    window.navigator.standalone
+  ) {
+    document.documentElement.classList.add("standalone");
+  }
+</script>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark">
 <meta name="theme-color" content="#000000">
+<meta name="description" content="Particle cloud QR file transfer — encode on Mac, decode with your phone camera.">
+<meta name="application-name" content="PartiCl">
+<meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="PartiCl">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon.svg">
 <title>PartiCl</title>
-<link rel="stylesheet" href="styles.css?v=700750">
+<link rel="stylesheet" href="styles.css?v=482916">
 </head>
 <body>
+  <div id="app" class="app">
   <header>
     <h1>PartiCl</h1>
-    <p class="tagline">Particle Cloud Transfer · <span id="buildId">700750</span></p>
+    <p class="tagline">Particle Cloud Transfer · <span id="buildId">482916</span></p>
   </header>
 
   <input type="file" id="fileInput" hidden>
@@ -94,6 +122,8 @@
         <div class="meterPeak" id="meterCrcPeak"></div>
       </div>
     </div>
+  </div>
+
   </div>
 
   <script src="vendor/qrcode/qrcode.js"></script>
@@ -226,6 +256,6 @@
     var st = document.getElementById("status");
     if(st) st.textContent = "";
   </script>
-  <script type="module" src="app-qr.js?v=700750"></script>
+  <script type="module" src="app-qr.js?v=482916"></script>
 </body>
 </html>
